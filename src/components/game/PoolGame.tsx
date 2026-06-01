@@ -56,45 +56,29 @@ const PoolGame: React.FC = () => {
   const isAimingRef = useRef(false);
   const mousePos = useRef({ x: 0, y: 0 });
   const [isMyTurn, setIsMyTurn] = useState(true);
-  
-  // Lobby State
+  const isMyTurnRef = useRef(true); // Ref to avoid effect restart
   const [publicRooms, setPublicRooms] = useState<Array<{ id: string, players: number }>>([]);
 
   useEffect(() => {
     hitSound.current = new Audio('/assets/sounds/hit.mp3');
     pocketSound.current = new Audio('/assets/sounds/pocket.mp3');
 
-    // Initialize Lobby Discovery with Presence only (avoids publish capability errors)
     const ably = new Ably.Realtime({ key: ABLY_KEY, clientId: clientId.current });
-    const lobby = ably.channels.get('pool-lobby');
+    const lobby = ably.channels.get('public:pool-lobby');
     lobbyChannelRef.current = lobby;
 
-    // We use a cleaner approach: a dedicated meta-channel where hosts announce their presence
-    lobby.presence.subscribe((presenceMsg) => {
-        if (presenceMsg.action === 'enter' || presenceMsg.action === 'present' || presenceMsg.action === 'update') {
-            const roomInfo = presenceMsg.data as { id: string, players: number };
-            if (roomInfo && roomInfo.id) {
-                setPublicRooms(prev => {
-                    const filtered = prev.filter(r => r.id !== roomInfo.id);
-                    if (roomInfo.players > 0 && roomInfo.players < 2) {
-                        return [...filtered, roomInfo].sort((a, b) => b.players - a.players);
-                    }
-                    return filtered;
-                });
+    lobby.subscribe('room-announce', (msg) => {
+        setPublicRooms(prev => {
+            const filtered = prev.filter(r => r.id !== msg.data.id);
+            if (msg.data.players > 0 && msg.data.players < 2) {
+                return [...filtered, msg.data].sort((a, b) => b.players - a.players);
             }
-        } else if (presenceMsg.action === 'leave') {
-            const roomInfo = presenceMsg.data as { id: string };
-            if (roomInfo && roomInfo.id) {
-                setPublicRooms(prev => prev.filter(r => r.id !== roomInfo.id));
-            }
-        }
+            return filtered;
+        });
     });
 
-    // Enter lobby to see others
-    lobby.presence.enter();
-
     return () => {
-        lobby.presence.leave();
+        lobby.unsubscribe();
         ably.close();
     };
   }, []);
@@ -178,7 +162,7 @@ const PoolGame: React.FC = () => {
     const renderer = new THREE.WebGLRenderer({ antialias: true });
     renderer.setSize(window.innerWidth, window.innerHeight);
     renderer.shadowMap.enabled = true;
-    renderer.shadowMap.type = THREE.PCFSoftShadowMap;
+    renderer.shadowMap.type = THREE.PCFShadowMap; // PCFSoftShadowMap is deprecated in latest Three.js
     containerRef.current?.appendChild(renderer.domElement);
 
     const texLoader = new THREE.TextureLoader();
@@ -264,61 +248,34 @@ const PoolGame: React.FC = () => {
     sceneRef.current = scene; cameraRef.current = camera; rendererRef.current = renderer;
   };
 
-  const handleShot = useCallback((angle: number, force: number) => {
-    if (!cueBallRef.current || isMovingRef.current) return;
-    const apply = (a: number, f: number) => {
-      Matter.Body.applyForce(cueBallRef.current!, cueBallRef.current!.position, { x: Math.cos(a) * f * 0.0015, y: Math.sin(a) * f * 0.0015 });
-      setIsMyTurn(prev => !prev);
-    };
-    apply(angle, force);
-    if (gameMode === 'online' && channelRef.current) {
-      channelRef.current.publish('shot', { angle, force, clientId: clientId.current });
-    }
-  }, [gameMode]);
-
-  const syncBallePositions = (positions: any) => {
-    if (!engineRef.current) return;
-    positions.forEach((pos: any) => {
-      const ball = ballsRef.current.find(b => b.id === pos.id);
-      if (ball) {
-        Matter.Body.setPosition(ball, { x: pos.x, y: pos.y });
-        Matter.Body.setVelocity(ball, { x: pos.vx, y: pos.vy });
-      }
-    });
-  };
-
   useEffect(() => {
     if (gameState !== 'playing') return;
 
     const { engine, cueBall, balls } = initPhysics();
     initThree(balls);
 
+    const cleanupOnline = () => {
+        if (ablyRef.current) ablyRef.current.close();
+        if (channelRef.current) channelRef.current.unsubscribe();
+    };
+
     if (gameMode === 'online' && roomId) {
       const ably = new Ably.Realtime({ key: ABLY_KEY, clientId: clientId.current });
       ablyRef.current = ably;
-      const channel = ably.channels.get(`pool-${roomId}`);
+      const channel = ably.channels.get(`public:pool-${roomId}`);
       channelRef.current = channel;
       
-      const lobby = ably.channels.get('pool-lobby');
+      const lobby = ably.channels.get('public:pool-lobby');
       
-      // Update presence to announce the room to the lobby
-      channel.presence.enter();
-      const updateLobby = () => {
-        channel.presence.get((err, members) => {
-            if (!err) {
-                // We update our status in the lobby channel's presence instead of publishing
-                lobby.presence.update({ id: roomId, players: members?.length || 0 });
-            }
-        });
-      };
-      
-      channel.presence.subscribe(updateLobby);
-      updateLobby(); // Initial update
+      const announce = () => { lobby.publish('room-announce', { id: roomId, players: 1 }).catch(() => {}); };
+      const interval = setInterval(announce, 5000);
+      announce();
 
       channel.subscribe('shot', (message) => {
         if (message.clientId !== clientId.current) {
           const { angle, force } = message.data;
           Matter.Body.applyForce(cueBall, cueBall.position, { x: Math.cos(angle) * force * 0.0015, y: Math.sin(angle) * force * 0.0015 });
+          isMyTurnRef.current = true;
           setIsMyTurn(true);
         }
       });
@@ -326,6 +283,8 @@ const PoolGame: React.FC = () => {
       channel.subscribe('sync', (message) => {
         if (role === 'client') syncBallePositions(message.data.balls);
       });
+
+      // Cleanup logic moved inside effect but stored in a variable
     }
 
     const animate = () => {
@@ -368,7 +327,7 @@ const PoolGame: React.FC = () => {
         }
       }
 
-      if (cueRef.current && !isMovingRef.current && isAimingRef.current && isMyTurn) {
+      if (cueRef.current && !isMovingRef.current && isAimingRef.current && isMyTurnRef.current) {
           const cb = cueBall.position;
           const dx = cb.x - mousePos.current.x, dy = cb.y - mousePos.current.y;
           const angle = Math.atan2(dy, dx), dist = Math.sqrt(dx*dx + dy*dy);
@@ -392,12 +351,27 @@ const PoolGame: React.FC = () => {
         if (raycaster.ray.intersectPlane(new THREE.Plane(new THREE.Vector3(0, 1, 0), 0), target)) mousePos.current = { x: target.x, y: target.z };
     };
 
-    const handleMouseDown = () => { if (!isMovingRef.current && isMyTurn) isAimingRef.current = true; };
+    const handleMouseDown = () => { if (!isMovingRef.current && isMyTurnRef.current) isAimingRef.current = true; };
     const handleMouseUp = () => {
         if (isAimingRef.current) {
             const dx = cueBall.position.x - mousePos.current.x, dy = cueBall.position.y - mousePos.current.y;
             const angle = Math.atan2(dy, dx), dist = Math.min(Math.sqrt(dx*dx + dy*dy), 250);
-            handleShot(angle, dist);
+            
+            // Execute shot
+            Matter.Body.applyForce(cueBall, cueBall.position, { x: Math.cos(angle) * dist * 0.0015, y: Math.sin(angle) * dist * 0.0015 });
+            
+            if (gameMode === 'online') {
+                isMyTurnRef.current = false;
+                setIsMyTurn(false);
+                if (channelRef.current) {
+                    channelRef.current.publish('shot', { angle, dist, clientId: clientId.current });
+                }
+            } else {
+                // In offline mode, the player always keeps their turn
+                isMyTurnRef.current = true;
+                setIsMyTurn(true);
+            }
+
             isAimingRef.current = false;
         }
     };
@@ -405,19 +379,17 @@ const PoolGame: React.FC = () => {
     window.addEventListener('mousemove', handleMouseMove);
     window.addEventListener('mousedown', handleMouseDown);
     window.addEventListener('mouseup', handleMouseUp);
-    animate();
+    const animId = requestAnimationFrame(animate);
+
     return () => {
         window.removeEventListener('mousemove', handleMouseMove);
         window.removeEventListener('mousedown', handleMouseDown);
         window.removeEventListener('mouseup', handleMouseUp);
+        cancelAnimationFrame(animId);
         rendererRef.current?.dispose();
-        if (channelRef.current) {
-            channelRef.current.presence.leave();
-            channelRef.current.unsubscribe();
-        }
-        if (ablyRef.current) ablyRef.current.close();
+        cleanupOnline();
     };
-  }, [gameState, gameMode, roomId, role, isMyTurn, handleShot]);
+  }, [gameState, gameMode, roomId, role]); // REMOVED isMyTurn and handleShot from deps!
 
   if (gameState === 'menu') {
     return (
@@ -439,7 +411,7 @@ const PoolGame: React.FC = () => {
               </h1>
               
               <button onClick={() => { setGameMode('offline'); setGameState('playing'); }} 
-                className="w-full group relative bg-white/[0.03] hover:bg-emerald-500 border border-white/5 hover:border-emerald-400 p-8 rounded-3xl transition-all duration-500 text-left overflow-hidden">
+                className="w-full group relative bg-white/[0.03] hover:bg-emerald-500 border border-white/5 hover:border-emerald-400 p-8 rounded-3xl transition-all duration-500 text-left overflow-hidden text-white">
                 <div className="absolute right-[-20px] bottom-[-20px] opacity-10 group-hover:opacity-20 transition-opacity">
                     <div className="w-32 h-32 border-8 border-white rounded-full" />
                 </div>
@@ -453,7 +425,7 @@ const PoolGame: React.FC = () => {
               <div className="flex items-center gap-4">
                 <input 
                   type="text" placeholder="NOME DA SALA..." value={roomId} onChange={(e) => setRoomId(e.target.value)}
-                  className="flex-1 bg-black/40 border border-white/5 p-6 rounded-2xl text-center font-black text-xl placeholder:text-white/10 focus:outline-none focus:border-emerald-500/50 focus:bg-black/60 transition-all uppercase tracking-wider"
+                  className="flex-1 bg-black/40 border border-white/5 p-6 rounded-2xl text-center font-black text-xl placeholder:text-white/10 focus:outline-none focus:border-emerald-500/50 focus:bg-black/60 transition-all uppercase tracking-wider text-white"
                 />
                 <button onClick={() => { if(!roomId) return; setGameMode('online'); setRole('host'); setGameState('playing'); }}
                   disabled={!roomId}
@@ -483,7 +455,7 @@ const PoolGame: React.FC = () => {
                     publicRooms.map(room => (
                         <button key={room.id} 
                             onClick={() => { setRoomId(room.id); setRole('client'); setGameMode('online'); setGameState('playing'); }}
-                            className="w-full bg-white/[0.03] hover:bg-white/[0.08] border border-white/5 p-5 rounded-2xl flex items-center justify-between group transition-all">
+                            className="w-full bg-white/[0.03] hover:bg-white/[0.08] border border-white/5 p-5 rounded-2xl flex items-center justify-between group transition-all text-white">
                             <div className="text-left">
                                 <p className="text-xs font-black text-emerald-500 uppercase tracking-widest mb-1">Sala</p>
                                 <p className="font-bold text-lg truncate w-[180px]">{room.id}</p>
@@ -498,10 +470,6 @@ const PoolGame: React.FC = () => {
                         </button>
                     ))
                 )}
-            </div>
-            
-            <div className="p-6 bg-white/[0.02] border-t border-white/5">
-                <p className="text-[9px] text-center font-bold text-white/20 uppercase tracking-[0.2em]">Servidores Ably Global Latency: ~20ms</p>
             </div>
           </div>
         </div>
