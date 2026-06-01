@@ -1,6 +1,6 @@
 'use client';
 
-import React, { useEffect, useRef, useState, useCallback } from 'react';
+import React, { useEffect, useRef, useState } from 'react';
 import * as Matter from 'matter-js';
 import * as THREE from 'three';
 
@@ -112,11 +112,11 @@ const PoolGame: React.FC = () => {
 
   const initThree = (physicsBalls: Matter.Body[]) => {
     const scene = new THREE.Scene();
-    scene.background = new THREE.Color(0x0a0a0a);
+    scene.background = new THREE.Color(0x222222);
     
     const camera = new THREE.PerspectiveCamera(45, window.innerWidth / window.innerHeight, 1, 5000);
-    camera.position.set(TABLE_WIDTH / 2, 600, TABLE_HEIGHT / 2 + 300);
-    camera.lookAt(TABLE_WIDTH / 2, 0, TABLE_HEIGHT / 2);
+    camera.position.set(TABLE_WIDTH / 2, 700, TABLE_HEIGHT / 2 + 500);
+    camera.lookAt(TABLE_WIDTH / 2, -100, TABLE_HEIGHT / 2);
 
     const renderer = new THREE.WebGLRenderer({ antialias: true });
     renderer.setSize(window.innerWidth, window.innerHeight);
@@ -124,17 +124,21 @@ const PoolGame: React.FC = () => {
     containerRef.current?.appendChild(renderer.domElement);
 
     // Lights
-    const ambientLight = new THREE.AmbientLight(0xffffff, 0.4);
+    const ambientLight = new THREE.AmbientLight(0xffffff, 1.0);
     scene.add(ambientLight);
 
-    const mainLight = new THREE.SpotLight(0xffffff, 1.5);
+    const mainLight = new THREE.SpotLight(0xffffff, 2.5);
     mainLight.position.set(TABLE_WIDTH / 2, 800, TABLE_HEIGHT / 2);
-    mainLight.angle = Math.PI / 4;
-    mainLight.penumbra = 0.3;
+    mainLight.angle = Math.PI / 3;
+    mainLight.penumbra = 0.4;
     mainLight.castShadow = true;
     mainLight.shadow.mapSize.width = 2048;
     mainLight.shadow.mapSize.height = 2048;
     scene.add(mainLight);
+
+    const fillLight = new THREE.DirectionalLight(0xffffff, 0.6);
+    fillLight.position.set(200, 400, 400);
+    scene.add(fillLight);
 
     // Table Floor (Felt)
     const tableGeo = new THREE.BoxGeometry(TABLE_WIDTH, 10, TABLE_HEIGHT);
@@ -164,6 +168,19 @@ const PoolGame: React.FC = () => {
     createRail(TABLE_WIDTH / 2, 10, TABLE_HEIGHT + WALL_THICKNESS / 2, TABLE_WIDTH + WALL_THICKNESS * 2, 30, WALL_THICKNESS);
     createRail(-WALL_THICKNESS / 2, 10, TABLE_HEIGHT / 2, WALL_THICKNESS, 30, TABLE_HEIGHT);
     createRail(TABLE_WIDTH + WALL_THICKNESS / 2, 10, TABLE_HEIGHT / 2, WALL_THICKNESS, 30, TABLE_HEIGHT);
+
+    // Table Legs
+    const legGeo = new THREE.CylinderGeometry(15, 10, 250, 8);
+    const createLeg = (x: number, z: number) => {
+      const leg = new THREE.Mesh(legGeo, railMat);
+      leg.position.set(x, -130, z);
+      leg.castShadow = true;
+      scene.add(leg);
+    };
+    createLeg(0, 0);
+    createLeg(TABLE_WIDTH, 0);
+    createLeg(0, TABLE_HEIGHT);
+    createLeg(TABLE_WIDTH, TABLE_HEIGHT);
 
     // Balls
     const ballGeo = new THREE.SphereGeometry(BALL_RADIUS, 32, 32);
@@ -210,7 +227,6 @@ const PoolGame: React.FC = () => {
         if (mesh) {
           mesh.position.set(body.position.x, BALL_RADIUS, body.position.y);
           
-          // Rotation based on movement
           if (body.speed > 0.1) {
             moving = true;
             const axis = new THREE.Vector3(body.velocity.y, 0, -body.velocity.x).normalize();
@@ -219,7 +235,6 @@ const PoolGame: React.FC = () => {
           }
         }
 
-        // Pocket check
         const pockets = [
             {x:0, y:0}, {x:TABLE_WIDTH/2, y:0}, {x:TABLE_WIDTH, y:0},
             {x:0, y:TABLE_HEIGHT}, {x:TABLE_WIDTH/2, y:TABLE_HEIGHT}, {x:TABLE_WIDTH, y:TABLE_HEIGHT}
@@ -246,7 +261,6 @@ const PoolGame: React.FC = () => {
           setIsMoving(moving);
       }
 
-      // Update Cue
       if (cueRef.current && !isMovingRef.current && isAimingRef.current) {
           const cb = cueBall.position;
           const dx = cb.x - mousePos.current.x;
@@ -270,7 +284,6 @@ const PoolGame: React.FC = () => {
     const handleMouseMove = (e: MouseEvent) => {
         if (!rendererRef.current) return;
         const rect = rendererRef.current.domElement.getBoundingClientRect();
-        // Simple projection back to table plane
         const x = (e.clientX - rect.left) / rect.width * 2 - 1;
         const y = -(e.clientY - rect.top) / rect.height * 2 + 1;
         
@@ -317,7 +330,6 @@ const PoolGame: React.FC = () => {
     <div className="relative w-full h-screen bg-black overflow-hidden font-sans">
       <div ref={containerRef} className="absolute inset-0" />
       
-      {/* HUD */}
       <div className="absolute top-8 left-1/2 -translate-x-1/2 flex gap-8 items-center z-20">
         <div className="bg-zinc-900/80 backdrop-blur-xl border border-white/10 px-6 py-3 rounded-2xl shadow-2xl flex items-center gap-6">
           <div className="flex flex-col">
