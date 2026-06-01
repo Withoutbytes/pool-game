@@ -2,7 +2,6 @@
   "name": "pool-game",
   "version": "0.1.0",
   "private": true,
-  "homepage": "https://Withoutbytes.github.io/pool-game",
   "scripts": {
     "dev": "next dev",
     "build": "next build",

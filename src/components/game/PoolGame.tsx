@@ -16,10 +16,9 @@ interface BallData {
   rotation: { x: number, y: number };
 }
 
-interface ChalkMark {
+interface PathPoint {
   x: number;
   y: number;
-  opacity: number;
 }
 
 const PoolGame: React.FC = () => {
@@ -29,11 +28,12 @@ const PoolGame: React.FC = () => {
   const mousePos = useRef({ x: 0, y: 0 });
   const isAimingRef = useRef(false);
   const isMovingRef = useRef(false);
+  const lastPredictionTime = useRef(0);
   const [score, setScore] = useState(0);
-  const chalkMarksRef = useRef<ChalkMark[]>([]); // Use ref to prevent engine rebuild on update
   const [isAimingState, setIsAimingState] = useState(false);
   const [isMovingState, setIsMovingState] = useState(false);
-
+  
+  const predictions = useRef<Map<number, PathPoint[]>>(new Map());
   const ballMetadata = useRef<Map<number, BallData>>(new Map());
 
   const applyShot = useCallback(() => {
@@ -47,41 +47,41 @@ const PoolGame: React.FC = () => {
       const dy = cueBall.position.y - mousePos.current.y;
       const angle = Math.atan2(dy, dx);
       const dist = Math.min(Math.sqrt(dx * dx + dy * dy), 250);
-      
-      // Much higher force and energy transfer tuning
       const forceMultiplier = 0.0012; 
       Matter.Body.applyForce(cueBall, cueBall.position, {
         x: Math.cos(angle) * dist * forceMultiplier,
         y: Math.sin(angle) * dist * forceMultiplier
       });
-
-      // Add a chalk mark at cue ball position silently (no re-render)
-      chalkMarksRef.current.push({ x: cueBall.position.x, y: cueBall.position.y, opacity: 0.4 });
-      if (chalkMarksRef.current.length > 10) chalkMarksRef.current.shift();
     }
 
     isAimingRef.current = false;
     setIsAimingState(false);
+    predictions.current.clear();
   }, []);
 
   useEffect(() => {
-    const engine = Matter.Engine.create({ 
-      gravity: { x: 0, y: 0 }, 
-      enableSleeping: true,
-      positionIterations: 10, // More precise collision
-      velocityIterations: 10
-    });
+    const engineConfig = { 
+      gravity: { x: 0, y: 0 }, enableSleeping: true,
+      positionIterations: 10, velocityIterations: 10, constraintIterations: 10
+    };
+
+    const engine = Matter.Engine.create(engineConfig);
     engineRef.current = engine;
     const world = engine.world;
 
-    // Walls - Table Cushions
+    const createWall = (x: number, y: number, w: number, h: number) => {
+        const wall = Matter.Bodies.rectangle(x, y, w, h, { isStatic: true, label: 'wall', friction: 0, restitution: 0.8 });
+        (wall as any).w = w; (wall as any).h = h;
+        return wall;
+    };
+
     const walls = [
-      Matter.Bodies.rectangle(TABLE_WIDTH * 0.25, -WALL_THICKNESS / 2, TABLE_WIDTH * 0.42, WALL_THICKNESS, { isStatic: true, label: 'wall', friction: 0.05, restitution: 0.8 }),
-      Matter.Bodies.rectangle(TABLE_WIDTH * 0.75, -WALL_THICKNESS / 2, TABLE_WIDTH * 0.42, WALL_THICKNESS, { isStatic: true, label: 'wall', friction: 0.05, restitution: 0.8 }),
-      Matter.Bodies.rectangle(TABLE_WIDTH * 0.25, TABLE_HEIGHT + WALL_THICKNESS / 2, TABLE_WIDTH * 0.42, WALL_THICKNESS, { isStatic: true, label: 'wall', friction: 0.05, restitution: 0.8 }),
-      Matter.Bodies.rectangle(TABLE_WIDTH * 0.75, TABLE_HEIGHT + WALL_THICKNESS / 2, TABLE_WIDTH * 0.42, WALL_THICKNESS, { isStatic: true, label: 'wall', friction: 0.05, restitution: 0.8 }),
-      Matter.Bodies.rectangle(-WALL_THICKNESS / 2, TABLE_HEIGHT / 2, WALL_THICKNESS, TABLE_HEIGHT * 0.75, { isStatic: true, label: 'wall', friction: 0.05, restitution: 0.8 }),
-      Matter.Bodies.rectangle(TABLE_WIDTH + WALL_THICKNESS / 2, TABLE_HEIGHT / 2, WALL_THICKNESS, TABLE_HEIGHT * 0.75, { isStatic: true, label: 'wall', friction: 0.05, restitution: 0.8 }),
+      createWall(TABLE_WIDTH * 0.25, -WALL_THICKNESS / 2, TABLE_WIDTH * 0.42, WALL_THICKNESS),
+      createWall(TABLE_WIDTH * 0.75, -WALL_THICKNESS / 2, TABLE_WIDTH * 0.42, WALL_THICKNESS),
+      createWall(TABLE_WIDTH * 0.25, TABLE_HEIGHT + WALL_THICKNESS / 2, TABLE_WIDTH * 0.42, WALL_THICKNESS),
+      createWall(TABLE_WIDTH * 0.75, TABLE_HEIGHT + WALL_THICKNESS / 2, TABLE_WIDTH * 0.42, WALL_THICKNESS),
+      createWall(-WALL_THICKNESS / 2, TABLE_HEIGHT / 2, WALL_THICKNESS, TABLE_HEIGHT * 0.75),
+      createWall(TABLE_WIDTH + WALL_THICKNESS / 2, TABLE_HEIGHT / 2, WALL_THICKNESS, TABLE_HEIGHT * 0.75),
     ];
 
     const pocketPositions = [
@@ -99,14 +99,9 @@ const PoolGame: React.FC = () => {
 
     const createBallBody = (x: number, y: number, isCue: boolean, config?: typeof ballConfigs[0]) => {
       const body = Matter.Bodies.circle(x, y, BALL_RADIUS, {
-        restitution: 0.95, // Max energy transfer
-        friction: 0, // No friction with table surface directly
-        frictionAir: 0.008, // Very low resistance for long rolls
-        mass: isCue ? 6 : 3, // Heavier balls for momentum
-        slop: 0.01,
+        restitution: 0.95, friction: 0.001, frictionAir: 0.012, mass: isCue ? 6 : 3, slop: 0.01,
         label: isCue ? 'cueBall' : 'ball'
       });
-      
       if (!isCue && config) {
         ballMetadata.current.set(body.id, {
           number: config.n, color: config.c, isStriped: config.s,
@@ -131,13 +126,84 @@ const PoolGame: React.FC = () => {
 
     Matter.Composite.add(world, [...walls, ...ballsArray]);
 
+    const runPrediction = () => {
+      if (!isAimingRef.current || isMovingRef.current || !engineRef.current) return;
+      
+      // Throttle prediction to 30fps for stability
+      const now = Date.now();
+      if (now - lastPredictionTime.current < 32) return;
+      lastPredictionTime.current = now;
+
+      const currentWorld = engineRef.current.world;
+      const virtualEngine = Matter.Engine.create(engineConfig);
+      
+      const virtualBodies = Matter.Composite.allBodies(currentWorld).map(b => {
+        let clone;
+        if (b.label === 'wall') {
+          clone = Matter.Bodies.rectangle(b.position.x, b.position.y, (b as any).w, (b as any).h, { 
+            isStatic: true, label: 'wall', restitution: b.restitution, friction: b.friction 
+          });
+        } else {
+          clone = Matter.Bodies.circle(b.position.x, b.position.y, BALL_RADIUS, {
+            isStatic: b.isStatic, restitution: b.restitution, friction: b.friction,
+            frictionAir: b.frictionAir, mass: b.mass, label: b.label
+          });
+          Matter.Body.setVelocity(clone, { x: b.velocity.x, y: b.velocity.y });
+          Matter.Body.setAngularVelocity(clone, b.angularVelocity);
+        }
+        (clone as any).originalId = b.id;
+        return clone;
+      });
+
+      Matter.Composite.add(virtualEngine.world, virtualBodies);
+
+      const virtualCue = virtualBodies.find(b => b.label === 'cueBall');
+      if (virtualCue) {
+        const dx = virtualCue.position.x - mousePos.current.x;
+        const dy = virtualCue.position.y - mousePos.current.y;
+        const angle = Math.atan2(dy, dx);
+        const dist = Math.min(Math.sqrt(dx * dx + dy * dy), 250);
+        Matter.Body.applyForce(virtualCue, virtualCue.position, {
+          x: Math.cos(angle) * dist * 0.0012,
+          y: Math.sin(angle) * dist * 0.0012
+        });
+      }
+
+      const paths = new Map<number, PathPoint[]>();
+      const dynamicBodies = virtualBodies.filter(b => !b.isStatic);
+      dynamicBodies.forEach(b => paths.set((b as any).originalId, [{x: b.position.x, y: b.position.y}]));
+
+      let allStopped = false;
+      let frames = 0;
+      const MAX_PREDICTION_FRAMES = 800; // Slightly reduced for better performance
+      const FIXED_STEP = 1000 / 60;
+
+      while (!allStopped && frames < MAX_PREDICTION_FRAMES) {
+        Matter.Engine.update(virtualEngine, FIXED_STEP);
+        allStopped = true;
+        frames++;
+
+        dynamicBodies.forEach(b => {
+          if (b.speed > 0.05) {
+            allStopped = false;
+            const path = paths.get((b as any).originalId);
+            if (path) {
+              const lastPoint = path[path.length - 1];
+              const distSq = (lastPoint.x - b.position.x)**2 + (lastPoint.y - b.position.y)**2;
+              if (distSq > 9) path.push({ x: b.position.x, y: b.position.y });
+            }
+          }
+        });
+      }
+      predictions.current = paths;
+    };
+
     Matter.Events.on(engine, 'afterUpdate', () => {
       const all = Matter.Composite.allBodies(world);
       const activeBalls = all.filter(b => b.label === 'ball' || b.label === 'cueBall');
       let moving = false;
-      
       activeBalls.forEach(ball => {
-        if (ball.speed > 0.08) {
+        if (ball.speed > 0.1) {
           moving = true;
           const meta = ballMetadata.current.get(ball.id);
           if (meta) {
@@ -149,14 +215,11 @@ const PoolGame: React.FC = () => {
           const dist = Matter.Vector.magnitude(Matter.Vector.sub(ball.position, p));
           if (dist < POCKET_RADIUS) {
             if (ball.label === 'cueBall') {
-              // Proper Cue Ball Reset
               Matter.Body.setPosition(ball, { x: TABLE_WIDTH * 0.25, y: TABLE_HEIGHT / 2 });
               Matter.Body.setVelocity(ball, { x: 0, y: 0 });
               Matter.Body.setAngularVelocity(ball, 0);
-              Matter.Body.setInertia(ball, Infinity); // Momentarily freeze to prevent phantom movement
-              setTimeout(() => {
-                if (ball) Matter.Body.setInertia(ball, ball.mass * (BALL_RADIUS * BALL_RADIUS) / 2);
-              }, 100);
+              Matter.Body.setInertia(ball, Infinity);
+              setTimeout(() => { if (ball) Matter.Body.setInertia(ball, ball.mass * (BALL_RADIUS * BALL_RADIUS) / 2); }, 100);
             } else {
               Matter.Composite.remove(world, ball);
               setScore(s => s + 10);
@@ -165,13 +228,16 @@ const PoolGame: React.FC = () => {
         });
       });
       if (moving !== isMovingRef.current) { isMovingRef.current = moving; setIsMovingState(moving); }
+      if (!moving && isAimingRef.current) runPrediction();
     });
 
     const onMouseMove = (e: MouseEvent) => {
       if (!canvasRef.current) return;
       const r = canvasRef.current.getBoundingClientRect();
       mousePos.current = { x: (e.clientX - r.left) * (TABLE_WIDTH / r.width), y: (e.clientY - r.top) * (TABLE_HEIGHT / r.height) };
+      if (!isMovingRef.current && isAimingRef.current) runPrediction();
     };
+    
     const onMouseUp = () => { if (isAimingRef.current) applyShot(); };
     window.addEventListener('mousemove', onMouseMove);
     window.addEventListener('mouseup', onMouseUp);
@@ -184,140 +250,76 @@ const PoolGame: React.FC = () => {
       const { x, y } = body.position;
       const isCue = body.label === 'cueBall';
       const meta = ballMetadata.current.get(body.id);
-
       ctx.save();
       ctx.translate(x, y);
-
-      // Deep Shadow
-      ctx.beginPath();
-      ctx.ellipse(3, 4, BALL_RADIUS, BALL_RADIUS * 0.7, 0, 0, Math.PI * 2);
-      ctx.fillStyle = 'rgba(0,0,0,0.3)';
-      ctx.fill();
-
-      // Base Sphere
-      ctx.beginPath();
-      ctx.arc(0, 0, BALL_RADIUS, 0, Math.PI * 2);
-      ctx.fillStyle = isCue ? '#fff' : (meta?.color || '#eee');
-      ctx.fill();
-
+      ctx.beginPath(); ctx.ellipse(3, 4, BALL_RADIUS, BALL_RADIUS * 0.7, 0, 0, Math.PI * 2);
+      ctx.fillStyle = 'rgba(0,0,0,0.3)'; ctx.fill();
+      ctx.beginPath(); ctx.arc(0, 0, BALL_RADIUS, 0, Math.PI * 2);
+      ctx.fillStyle = isCue ? '#fff' : (meta?.color || '#eee'); ctx.fill();
       if (meta) {
         if (meta.isStriped) {
-          ctx.beginPath();
-          ctx.arc(0, 0, BALL_RADIUS, -0.6, 0.6);
-          ctx.arc(0, 0, BALL_RADIUS, Math.PI - 0.6, Math.PI + 0.6);
-          ctx.fillStyle = '#fff';
-          ctx.fill();
+          ctx.beginPath(); ctx.arc(0, 0, BALL_RADIUS, -0.6, 0.6); ctx.arc(0, 0, BALL_RADIUS, Math.PI - 0.6, Math.PI + 0.6);
+          ctx.fillStyle = '#fff'; ctx.fill();
         }
-
-        const rotX = Math.sin(meta.rotation.x) * (BALL_RADIUS * 0.5);
-        const rotY = Math.cos(meta.rotation.y) * (BALL_RADIUS * 0.5);
-        const distFromCenter = Math.sqrt(rotX*rotX + rotY*rotY);
-        const circleSize = Math.max(0.1, (1 - distFromCenter/BALL_RADIUS)) * 0.5;
-
-        ctx.beginPath();
-        ctx.arc(rotX, rotY, BALL_RADIUS * circleSize, 0, Math.PI * 2);
-        ctx.fillStyle = '#fff';
-        ctx.fill();
-
+        const rotX = Math.sin(meta.rotation.x) * (BALL_RADIUS * 0.5), rotY = Math.cos(meta.rotation.y) * (BALL_RADIUS * 0.5);
+        const distFromCenter = Math.sqrt(rotX*rotX + rotY*rotY), circleSize = Math.max(0.1, (1 - distFromCenter/BALL_RADIUS)) * 0.5;
+        ctx.beginPath(); ctx.arc(rotX, rotY, BALL_RADIUS * circleSize, 0, Math.PI * 2);
+        ctx.fillStyle = '#fff'; ctx.fill();
         if (circleSize > 0.3) {
-          ctx.fillStyle = '#000';
-          ctx.font = `bold ${BALL_RADIUS * circleSize}px Arial`;
-          ctx.textAlign = 'center';
-          ctx.textBaseline = 'middle';
-          ctx.fillText(meta.number.toString(), rotX, rotY);
+          ctx.fillStyle = '#000'; ctx.font = `bold ${BALL_RADIUS * circleSize}px Arial`;
+          ctx.textAlign = 'center'; ctx.textBaseline = 'middle'; ctx.fillText(meta.number.toString(), rotX, rotY);
         }
       }
-
-      // Gloss & Highlight
       const grad = ctx.createRadialGradient(-BALL_RADIUS*0.35, -BALL_RADIUS*0.35, BALL_RADIUS*0.05, 0, 0, BALL_RADIUS);
-      grad.addColorStop(0, 'rgba(255,255,255,0.7)');
-      grad.addColorStop(0.3, 'rgba(255,255,255,0.1)');
-      grad.addColorStop(0.7, 'rgba(0,0,0,0)');
-      grad.addColorStop(1, 'rgba(0,0,0,0.4)');
-      ctx.fillStyle = grad;
-      ctx.beginPath();
-      ctx.arc(0, 0, BALL_RADIUS, 0, Math.PI * 2);
-      ctx.fill();
-
+      grad.addColorStop(0, 'rgba(255,255,255,0.7)'); grad.addColorStop(1, 'rgba(0,0,0,0.4)');
+      ctx.fillStyle = grad; ctx.beginPath(); ctx.arc(0, 0, BALL_RADIUS, 0, Math.PI * 2); ctx.fill();
       ctx.restore();
     };
 
     const animate = (t: number) => {
       Matter.Engine.update(engine, 1000 / 60);
       ctx.clearRect(0, 0, TABLE_WIDTH, TABLE_HEIGHT);
-      
-      // Realistic Felt Texture
       ctx.fillStyle = '#1b5e20';
       ctx.fillRect(0, 0, TABLE_WIDTH, TABLE_HEIGHT);
-      ctx.fillStyle = 'rgba(0,0,0,0.05)';
-      for(let i=0; i<TABLE_WIDTH; i+=4) {
-        for(let j=0; j<TABLE_HEIGHT; j+=4) {
-          if(Math.random() > 0.8) ctx.fillRect(i, j, 1, 1);
-        }
+
+      if (isAimingRef.current && !isMovingRef.current) {
+        predictions.current.forEach((path, id) => {
+          if (path.length < 2) return;
+          ctx.beginPath();
+          ctx.setLineDash([2, 4]);
+          ctx.strokeStyle = id === (cueBall as any).id ? 'rgba(255,255,255,0.6)' : 'rgba(255,255,255,0.2)';
+          ctx.moveTo(path[0].x, path[0].y);
+          for (let i = 1; i < path.length; i++) ctx.lineTo(path[i].x, path[i].y);
+          ctx.stroke();
+          ctx.setLineDash([]);
+        });
       }
 
-      // Chalk Marks
-      chalkMarksRef.current.forEach(m => {
-        ctx.beginPath();
-        ctx.arc(m.x, m.y, 4, 0, Math.PI*2);
-        ctx.fillStyle = `rgba(100, 200, 255, ${m.opacity})`;
-        ctx.fill();
-      });
-
-      // Table Branding / Center Mark
-      ctx.strokeStyle = 'rgba(255,255,255,0.1)';
-      ctx.lineWidth = 1;
-      ctx.beginPath(); ctx.arc(TABLE_WIDTH/2, TABLE_HEIGHT/2, 2, 0, Math.PI*2); ctx.stroke();
-      ctx.beginPath(); ctx.arc(TABLE_WIDTH*0.25, TABLE_HEIGHT/2, 2, 0, Math.PI*2); ctx.stroke();
-
-      // Pockets
       pocketPositions.forEach(p => {
-        ctx.fillStyle = '#0a2a0d';
-        ctx.beginPath(); ctx.arc(p.x, p.y, POCKET_RADIUS, 0, Math.PI * 2); ctx.fill();
-        ctx.fillStyle = '#000';
-        ctx.beginPath(); ctx.arc(p.x, p.y, POCKET_RADIUS * 0.85, 0, Math.PI * 2); ctx.fill();
+        ctx.fillStyle = '#0a2a0d'; ctx.beginPath(); ctx.arc(p.x, p.y, POCKET_RADIUS, 0, Math.PI * 2); ctx.fill();
+        ctx.fillStyle = '#000'; ctx.beginPath(); ctx.arc(p.x, p.y, POCKET_RADIUS * 0.85, 0, Math.PI * 2); ctx.fill();
       });
 
-      // Bodies
       const bodies = Matter.Composite.allBodies(world);
       bodies.forEach(b => { if (b.label !== 'wall') drawBall(b); });
 
-      // Aiming UI & Cue Shadow
       const cue = bodies.find(b => b.label === 'cueBall');
       if (isAimingRef.current && cue && !isMovingRef.current) {
         const dx = cue.position.x - mousePos.current.x, dy = cue.position.y - mousePos.current.y;
         const angle = Math.atan2(dy, dx), dist = Math.min(Math.sqrt(dx*dx + dy*dy), 250);
-        
-        // Prediction Line
-        ctx.beginPath(); ctx.setLineDash([4, 6]); ctx.strokeStyle = 'rgba(255,255,255,0.2)';
-        ctx.moveTo(cue.position.x, cue.position.y);
-        ctx.lineTo(cue.position.x + Math.cos(angle) * 600, cue.position.y + Math.sin(angle) * 600);
-        ctx.stroke(); ctx.setLineDash([]);
-
         const offset = BALL_RADIUS + 12 + (dist * 0.15);
-        
-        // Cue Shadow
-        ctx.save();
-        ctx.translate(2, 4);
-        ctx.beginPath(); ctx.lineWidth = 7; ctx.lineCap = 'round'; ctx.strokeStyle = 'rgba(0,0,0,0.2)';
+        ctx.save(); ctx.translate(2, 4); ctx.beginPath(); ctx.lineWidth = 7; ctx.lineCap = 'round';
+        ctx.strokeStyle = 'rgba(0,0,0,0.2)';
         ctx.moveTo(cue.position.x - Math.cos(angle)*offset, cue.position.y - Math.sin(angle)*offset);
         ctx.lineTo(cue.position.x - Math.cos(angle)*(offset+300), cue.position.y - Math.sin(angle)*(offset+300));
-        ctx.stroke();
-        ctx.restore();
-
-        // Wood Cue
+        ctx.stroke(); ctx.restore();
         ctx.beginPath(); ctx.lineWidth = 6; ctx.lineCap = 'round';
-        const cueGrad = ctx.createLinearGradient(
-            cue.position.x - Math.cos(angle)*offset, cue.position.y - Math.sin(angle)*offset,
-            cue.position.x - Math.cos(angle)*(offset+300), cue.position.y - Math.sin(angle)*(offset+300)
-        );
-        cueGrad.addColorStop(0, '#d7ccc8'); cueGrad.addColorStop(0.1, '#5d4037'); cueGrad.addColorStop(1, '#3e2723');
-        ctx.strokeStyle = cueGrad;
+        const cueGrad = ctx.createLinearGradient(cue.position.x - Math.cos(angle)*offset, cue.position.y - Math.sin(angle)*offset, cue.position.x - Math.cos(angle)*(offset+300), cue.position.y - Math.sin(angle)*(offset+300));
+        cueGrad.addColorStop(0, '#d7ccc8'); cueGrad.addColorStop(1, '#3e2723'); ctx.strokeStyle = cueGrad;
         ctx.moveTo(cue.position.x - Math.cos(angle)*offset, cue.position.y - Math.sin(angle)*offset);
         ctx.lineTo(cue.position.x - Math.cos(angle)*(offset+300), cue.position.y - Math.sin(angle)*(offset+300));
         ctx.stroke();
       }
-
       requestRef.current = requestAnimationFrame(animate);
     };
     requestRef.current = requestAnimationFrame(animate);
@@ -340,38 +342,29 @@ const PoolGame: React.FC = () => {
                 <span className="text-emerald-500/50 text-[9px] font-black tracking-widest uppercase">Score</span>
                 <span className="font-mono text-2xl text-white font-bold leading-none">{score.toString().padStart(4, '0')}</span>
             </div>
-            <div className="w-[1px] h-8 bg-white/10" />
-            <div className="flex flex-col items-start">
-                <span className="text-emerald-500/50 text-[9px] font-black tracking-widest uppercase">Status</span>
-                <span className={`text-xs font-bold uppercase tracking-tighter ${isMovingState ? 'text-amber-500' : 'text-emerald-400'}`}>
-                    {isMovingState ? 'Rolling...' : 'Ready'}
-                </span>
-            </div>
           </div>
         </div>
       </div>
-      
       <div className="relative group p-1 bg-gradient-to-br from-amber-800 to-amber-950 rounded-[40px] shadow-[0_50px_100px_-20px_rgba(0,0,0,1)]">
         <div className="relative p-4 bg-emerald-900/10 rounded-[35px] backdrop-blur-sm">
           <div className="relative border-[20px] border-amber-950 rounded-2xl shadow-2xl overflow-hidden">
-            {/* Table Cushion Highlights */}
-            <div className="absolute inset-0 pointer-events-none border border-white/5 rounded-lg z-10" />
             <canvas ref={canvasRef} width={TABLE_WIDTH} height={TABLE_HEIGHT} onMouseDown={() => { if (!isMovingRef.current) { isAimingRef.current = true; setIsAimingState(true); } }} className="block" />
           </div>
         </div>
       </div>
-
-      <div className="mt-10 flex gap-6 overflow-x-auto pb-4 max-w-full px-4 no-scrollbar">
-        {[
-          { t: "Física de Elite", d: "Bolas pesadas com atrito de pano silk para rolagem infinita." },
-          { t: "Feedback Tátil", d: "Marcas de giz surgem na mesa após tacadas potentes." },
-          { t: "Visual Imersivo", d: "Sombras dinâmicas, taco de madeira e textura de feltro real." }
-        ].map((item, i) => (
-          <div key={i} className="min-w-[260px] bg-zinc-900/40 p-6 rounded-3xl border border-white/5 backdrop-blur-md">
-            <h3 className="text-emerald-400 font-black mb-2 text-xs uppercase tracking-widest">{item.t}</h3>
-            <p className="text-zinc-500 text-xs leading-relaxed">{item.d}</p>
-          </div>
-        ))}
+      <div className="mt-10 grid grid-cols-1 md:grid-cols-3 gap-6 w-full max-w-5xl px-4 text-center">
+        <div className="bg-zinc-900/40 p-5 rounded-3xl border border-white/5 backdrop-blur-md">
+          <h3 className="text-emerald-400 font-black mb-2 text-xs uppercase tracking-widest">Predição Estável</h3>
+          <p className="text-zinc-500 text-xs leading-relaxed">Clonagem de geometria aprimorada para evitar desvios matemáticos.</p>
+        </div>
+        <div className="bg-zinc-900/40 p-5 rounded-3xl border border-white/5 backdrop-blur-md">
+          <h3 className="text-emerald-400 font-black mb-2 text-xs uppercase tracking-widest">Performance Otimizada</h3>
+          <p className="text-zinc-500 text-xs leading-relaxed">Throttling de simulação para garantir 60 FPS constantes durante a mira.</p>
+        </div>
+        <div className="bg-zinc-900/40 p-5 rounded-3xl border border-white/5 backdrop-blur-md">
+          <h3 className="text-emerald-400 font-bold mb-1 text-sm uppercase">Física de Precisão</h3>
+          <p className="text-zinc-400 text-xs text-balance leading-relaxed">Cálculo de trajetória até o repouso total de cada bola.</p>
+        </div>
       </div>
     </div>
   );
