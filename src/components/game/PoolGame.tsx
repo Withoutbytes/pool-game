@@ -1,3 +1,5 @@
+'use client';
+
 import React, { useEffect, useRef, useState, useCallback } from 'react';
 import * as Matter from 'matter-js';
 import * as THREE from 'three';
@@ -83,7 +85,7 @@ const PoolGame: React.FC = () => {
     const ctx = canvas.getContext('2d')!;
     
     // Background
-    ctx.fillStyle = isCue ? '#ffffff' : (config?.color || '#eeeeee');
+    ctx.fillStyle = isCue ? '#ffffff' : (config?.c || '#eeeeee');
     ctx.fillRect(0, 0, 256, 128);
 
     if (config?.s) {
@@ -273,7 +275,7 @@ const PoolGame: React.FC = () => {
         const y = -(e.clientY - rect.top) / rect.height * 2 + 1;
         
         const raycaster = new THREE.Raycaster();
-        raycaster.setFromCamera({x, y}, cameraRef.current!);
+        raycaster.setFromCamera(new THREE.Vector2(x, y), cameraRef.current!);
         const plane = new THREE.Plane(new THREE.Vector3(0, 1, 0), 0);
         const target = new THREE.Vector3();
         if (raycaster.ray.intersectPlane(plane, target)) {
