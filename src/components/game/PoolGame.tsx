@@ -64,27 +64,37 @@ const PoolGame: React.FC = () => {
     hitSound.current = new Audio('/assets/sounds/hit.mp3');
     pocketSound.current = new Audio('/assets/sounds/pocket.mp3');
 
-    // Initialize Lobby Discovery
+    // Initialize Lobby Discovery with Presence only (avoids publish capability errors)
     const ably = new Ably.Realtime({ key: ABLY_KEY, clientId: clientId.current });
     const lobby = ably.channels.get('pool-lobby');
     lobbyChannelRef.current = lobby;
 
-    // Listen for room updates
-    lobby.subscribe('room-update', (msg) => {
-        setPublicRooms(prev => {
-            const filtered = prev.filter(r => r.id !== msg.data.id);
-            if (msg.data.players > 0) {
-                return [...filtered, msg.data].sort((a, b) => b.players - a.players);
+    // We use a cleaner approach: a dedicated meta-channel where hosts announce their presence
+    lobby.presence.subscribe((presenceMsg) => {
+        if (presenceMsg.action === 'enter' || presenceMsg.action === 'present' || presenceMsg.action === 'update') {
+            const roomInfo = presenceMsg.data as { id: string, players: number };
+            if (roomInfo && roomInfo.id) {
+                setPublicRooms(prev => {
+                    const filtered = prev.filter(r => r.id !== roomInfo.id);
+                    if (roomInfo.players > 0 && roomInfo.players < 2) {
+                        return [...filtered, roomInfo].sort((a, b) => b.players - a.players);
+                    }
+                    return filtered;
+                });
             }
-            return filtered;
-        });
+        } else if (presenceMsg.action === 'leave') {
+            const roomInfo = presenceMsg.data as { id: string };
+            if (roomInfo && roomInfo.id) {
+                setPublicRooms(prev => prev.filter(r => r.id !== roomInfo.id));
+            }
+        }
     });
 
-    // Request initial list
-    lobby.publish('get-rooms', {});
+    // Enter lobby to see others
+    lobby.presence.enter();
 
     return () => {
-        lobby.unsubscribe();
+        lobby.presence.leave();
         ably.close();
     };
   }, []);
@@ -284,20 +294,28 @@ const PoolGame: React.FC = () => {
     initThree(balls);
 
     if (gameMode === 'online' && roomId) {
-      ablyRef.current = new Ably.Realtime({ key: ABLY_KEY, clientId: clientId.current });
-      channelRef.current = ablyRef.current.channels.get(`pool-${roomId}`);
+      const ably = new Ably.Realtime({ key: ABLY_KEY, clientId: clientId.current });
+      ablyRef.current = ably;
+      const channel = ably.channels.get(`pool-${roomId}`);
+      channelRef.current = channel;
       
-      // Update presence in lobby
-      channelRef.current.presence.enter();
-      channelRef.current.presence.subscribe(() => {
-        channelRef.current?.presence.get((err, members) => {
-            if (!err && lobbyChannelRef.current) {
-                lobbyChannelRef.current.publish('room-update', { id: roomId, players: members?.length || 0 });
+      const lobby = ably.channels.get('pool-lobby');
+      
+      // Update presence to announce the room to the lobby
+      channel.presence.enter();
+      const updateLobby = () => {
+        channel.presence.get((err, members) => {
+            if (!err) {
+                // We update our status in the lobby channel's presence instead of publishing
+                lobby.presence.update({ id: roomId, players: members?.length || 0 });
             }
         });
-      });
+      };
+      
+      channel.presence.subscribe(updateLobby);
+      updateLobby(); // Initial update
 
-      channelRef.current.subscribe('shot', (message) => {
+      channel.subscribe('shot', (message) => {
         if (message.clientId !== clientId.current) {
           const { angle, force } = message.data;
           Matter.Body.applyForce(cueBall, cueBall.position, { x: Math.cos(angle) * force * 0.0015, y: Math.sin(angle) * force * 0.0015 });
@@ -305,7 +323,7 @@ const PoolGame: React.FC = () => {
         }
       });
 
-      channelRef.current.subscribe('sync', (message) => {
+      channel.subscribe('sync', (message) => {
         if (role === 'client') syncBallePositions(message.data.balls);
       });
     }
@@ -404,12 +422,10 @@ const PoolGame: React.FC = () => {
   if (gameState === 'menu') {
     return (
       <div className="w-full h-screen bg-[#0a0a0a] flex items-center justify-center font-sans text-white overflow-hidden relative">
-        {/* Background Gradients */}
         <div className="absolute top-[-10%] left-[-10%] w-[40%] h-[40%] bg-emerald-500/10 blur-[120px] rounded-full animate-pulse" />
         <div className="absolute bottom-[-10%] right-[-10%] w-[40%] h-[40%] bg-cyan-500/10 blur-[120px] rounded-full" />
         
         <div className="relative z-10 flex flex-col md:flex-row gap-8 w-full max-w-6xl px-8 h-[600px]">
-          {/* Main Controls */}
           <div className="flex-1 bg-zinc-900/50 backdrop-blur-3xl border border-white/5 p-10 rounded-[40px] shadow-2xl flex flex-col justify-between">
             <div>
               <div className="flex items-center gap-3 mb-2">
@@ -448,7 +464,6 @@ const PoolGame: React.FC = () => {
             </div>
           </div>
 
-          {/* Public Rooms List */}
           <div className="w-full md:w-[380px] bg-black/40 backdrop-blur-2xl border border-white/5 rounded-[40px] flex flex-col overflow-hidden">
             <div className="p-8 border-b border-white/5 flex items-center justify-between bg-white/[0.02]">
                 <h3 className="font-black text-sm uppercase tracking-widest text-white/60 flex items-center gap-2">
