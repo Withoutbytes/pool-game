@@ -58,12 +58,20 @@ const PoolGame: React.FC = () => {
   const [isMyTurn, setIsMyTurn] = useState(true);
   const isMyTurnRef = useRef(true); // Ref to avoid effect restart
   const [publicRooms, setPublicRooms] = useState<Array<{ id: string, players: number }>>([]);
+  const [connectionStatus, setConnectionStatus] = useState<'connected' | 'connecting' | 'disconnected'>('disconnected');
 
   useEffect(() => {
     hitSound.current = new Audio('/assets/sounds/hit.mp3');
     pocketSound.current = new Audio('/assets/sounds/pocket.mp3');
 
     const ably = new Ably.Realtime({ key: ABLY_KEY, clientId: clientId.current });
+    ablyRef.current = ably;
+    
+    ably.connection.on('connected', () => setConnectionStatus('connected'));
+    ably.connection.on('connecting', () => setConnectionStatus('connecting'));
+    ably.connection.on('disconnected', () => setConnectionStatus('disconnected'));
+    ably.connection.on('failed', () => setConnectionStatus('disconnected'));
+
     const lobby = ably.channels.get('public:pool-lobby');
     lobbyChannelRef.current = lobby;
 
@@ -162,7 +170,7 @@ const PoolGame: React.FC = () => {
     const renderer = new THREE.WebGLRenderer({ antialias: true });
     renderer.setSize(window.innerWidth, window.innerHeight);
     renderer.shadowMap.enabled = true;
-    renderer.shadowMap.type = THREE.PCFShadowMap; // PCFSoftShadowMap is deprecated in latest Three.js
+    renderer.shadowMap.type = THREE.PCFShadowMap; 
     containerRef.current?.appendChild(renderer.domElement);
 
     const texLoader = new THREE.TextureLoader();
@@ -248,6 +256,17 @@ const PoolGame: React.FC = () => {
     sceneRef.current = scene; cameraRef.current = camera; rendererRef.current = renderer;
   };
 
+  const syncBallPositions = (positions: any) => {
+    if (!engineRef.current) return;
+    positions.forEach((pos: any) => {
+      const ball = ballsRef.current.find(b => b.id === pos.id);
+      if (ball) {
+        Matter.Body.setPosition(ball, { x: pos.x, y: pos.y });
+        Matter.Body.setVelocity(ball, { x: pos.vx, y: pos.vy });
+      }
+    });
+  };
+
   useEffect(() => {
     if (gameState !== 'playing') return;
 
@@ -281,10 +300,8 @@ const PoolGame: React.FC = () => {
       });
 
       channel.subscribe('sync', (message) => {
-        if (role === 'client') syncBallePositions(message.data.balls);
+        if (role === 'client') syncBallPositions(message.data.balls);
       });
-
-      // Cleanup logic moved inside effect but stored in a variable
     }
 
     const animate = () => {
@@ -367,7 +384,6 @@ const PoolGame: React.FC = () => {
                     channelRef.current.publish('shot', { angle, dist, clientId: clientId.current });
                 }
             } else {
-                // In offline mode, the player always keeps their turn
                 isMyTurnRef.current = true;
                 setIsMyTurn(true);
             }
@@ -389,7 +405,7 @@ const PoolGame: React.FC = () => {
         rendererRef.current?.dispose();
         cleanupOnline();
     };
-  }, [gameState, gameMode, roomId, role]); // REMOVED isMyTurn and handleShot from deps!
+  }, [gameState, gameMode, roomId, role]);
 
   if (gameState === 'menu') {
     return (
@@ -504,6 +520,23 @@ const PoolGame: React.FC = () => {
             <span className="text-[10px] font-black text-emerald-500 uppercase tracking-widest opacity-50">Sala</span>
             <span className="text-xs font-bold uppercase text-white truncate max-w-[100px]">{gameMode === 'online' ? roomId : 'LOCAL'}</span>
           </div>
+          {gameMode === 'online' && (
+            <>
+              <div className="w-px h-8 bg-white/10" />
+              <div className="flex flex-col items-center">
+                <span className="text-[10px] font-black text-emerald-500 uppercase tracking-widest opacity-50">Rede</span>
+                <div className="flex items-center gap-1.5 mt-1">
+                  <div className={`w-2 h-2 rounded-full animate-pulse ${
+                    connectionStatus === 'connected' ? 'bg-emerald-500 shadow-[0_0_10px_#10b981]' : 
+                    connectionStatus === 'connecting' ? 'bg-amber-500' : 'bg-red-500'
+                  }`} />
+                  <span className="text-[10px] font-bold text-white/80 uppercase">
+                    {connectionStatus}
+                  </span>
+                </div>
+              </div>
+            </>
+          )}
         </div>
       </div>
       <button onClick={() => { setGameState('menu'); if(ablyRef.current) ablyRef.current.close(); }} 
