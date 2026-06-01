@@ -1,8 +1,9 @@
 'use client';
 
-import React, { useEffect, useRef, useState } from 'react';
+import React, { useEffect, useRef, useState, useCallback } from 'react';
 import * as Matter from 'matter-js';
 import * as THREE from 'three';
+import Ably from 'ably';
 
 // Constants
 const TABLE_WIDTH = 800;
@@ -10,6 +11,8 @@ const TABLE_HEIGHT = 400;
 const BALL_RADIUS = 10;
 const WALL_THICKNESS = 40;
 const POCKET_RADIUS = 18;
+
+const ABLY_KEY = 'w9w0hQ.SielQA:rM9oV-3hJtQChQuhDngQa-TuNexXDlVcd6n82GcvDCA';
 
 const ballConfigs = [
   { n: 1, c: '#ffeb3b', s: false }, { n: 2, c: '#1976d2', s: false },
@@ -30,16 +33,28 @@ const PoolGame: React.FC = () => {
   const rendererRef = useRef<THREE.WebGLRenderer | null>(null);
   const balls3D = useRef<Map<number, THREE.Mesh>>(new Map());
   const cueRef = useRef<THREE.Group | null>(null);
+  const cueBallRef = useRef<Matter.Body | null>(null);
+  const ballsRef = useRef<Matter.Body[]>([]);
   
+  // Ably Refs
+  const ablyRef = useRef<Ably.Realtime | null>(null);
+  const channelRef = useRef<Ably.RealtimeChannel | null>(null);
+  const clientId = useRef(`player-${Math.random().toString(36).substr(2, 9)}`);
+
   // Sounds
   const hitSound = useRef<HTMLAudioElement | null>(null);
   const pocketSound = useRef<HTMLAudioElement | null>(null);
 
+  const [gameState, setGameState] = useState<'menu' | 'playing'>('menu');
+  const [gameMode, setGameMode] = useState<'offline' | 'online'>('offline');
+  const [roomId, setRoomId] = useState('');
+  const [role, setRole] = useState<'host' | 'client'>('host');
   const [score, setScore] = useState(0);
   const [isMoving, setIsMoving] = useState(false);
   const isMovingRef = useRef(false);
   const isAimingRef = useRef(false);
   const mousePos = useRef({ x: 0, y: 0 });
+  const [isMyTurn, setIsMyTurn] = useState(true);
 
   useEffect(() => {
     hitSound.current = new Audio('/assets/sounds/hit.mp3');
@@ -56,11 +71,7 @@ const PoolGame: React.FC = () => {
 
   const initPhysics = () => {
     const engine = Matter.Engine.create({ gravity: { x: 0, y: 0 } });
-    
-    const createWall = (x: number, y: number, w: number, h: number) => {
-      return Matter.Bodies.rectangle(x, y, w, h, { isStatic: true, friction: 0, restitution: 0.8 });
-    };
-
+    const createWall = (x: number, y: number, w: number, h: number) => Matter.Bodies.rectangle(x, y, w, h, { isStatic: true, friction: 0, restitution: 0.8 });
     const walls = [
       createWall(TABLE_WIDTH / 2, -WALL_THICKNESS / 2, TABLE_WIDTH + WALL_THICKNESS * 2, WALL_THICKNESS),
       createWall(TABLE_WIDTH / 2, TABLE_HEIGHT + WALL_THICKNESS / 2, TABLE_WIDTH + WALL_THICKNESS * 2, WALL_THICKNESS),
@@ -72,6 +83,7 @@ const PoolGame: React.FC = () => {
     const cueBall = Matter.Bodies.circle(TABLE_WIDTH * 0.25, TABLE_HEIGHT / 2, BALL_RADIUS, {
       restitution: 0.95, friction: 0.001, frictionAir: 0.012, mass: 6, label: 'cueBall'
     });
+    cueBallRef.current = cueBall;
     balls.push(cueBall);
 
     const startX = TABLE_WIDTH * 0.7;
@@ -81,9 +93,7 @@ const PoolGame: React.FC = () => {
       for (let col = 0; col <= row; col++) {
         const x = startX + row * (BALL_RADIUS * 1.75);
         const y = startY + (col - row / 2) * (BALL_RADIUS * 2.1);
-        const ball = Matter.Bodies.circle(x, y, BALL_RADIUS, {
-          restitution: 0.95, friction: 0.001, frictionAir: 0.012, mass: 3, label: 'ball'
-        });
+        const ball = Matter.Bodies.circle(x, y, BALL_RADIUS, { restitution: 0.95, friction: 0.001, frictionAir: 0.012, mass: 3, label: 'ball' });
         (ball as any).config = ballConfigs[ballIdx++];
         balls.push(ball);
       }
@@ -98,6 +108,7 @@ const PoolGame: React.FC = () => {
 
     Matter.Composite.add(engine.world, [...walls, ...balls]);
     engineRef.current = engine;
+    ballsRef.current = balls;
     return { engine, cueBall, balls };
   };
 
@@ -121,16 +132,15 @@ const PoolGame: React.FC = () => {
 
   const initThree = (physicsBalls: Matter.Body[]) => {
     const scene = new THREE.Scene();
-    scene.background = new THREE.Color(0x050505);
-    scene.fog = new THREE.Fog(0x050505, 1000, 3000);
-    
+    scene.background = new THREE.Color(0x222222);
     const camera = new THREE.PerspectiveCamera(45, window.innerWidth / window.innerHeight, 1, 10000);
-    camera.position.set(TABLE_WIDTH / 2, 700, TABLE_HEIGHT / 2 + 700);
-    camera.lookAt(TABLE_WIDTH / 2, -100, TABLE_HEIGHT / 2);
+    camera.position.set(TABLE_WIDTH / 2, 750, TABLE_HEIGHT / 2 + 650);
+    camera.lookAt(TABLE_WIDTH / 2, -50, TABLE_HEIGHT / 2);
 
     const renderer = new THREE.WebGLRenderer({ antialias: true });
     renderer.setSize(window.innerWidth, window.innerHeight);
     renderer.shadowMap.enabled = true;
+    renderer.shadowMap.type = THREE.PCFSoftShadowMap;
     containerRef.current?.appendChild(renderer.domElement);
 
     const texLoader = new THREE.TextureLoader();
@@ -143,62 +153,43 @@ const PoolGame: React.FC = () => {
     const floorTex = texLoader.load('/assets/textures/floor.jpg');
     floorTex.wrapS = floorTex.wrapT = THREE.RepeatWrapping; floorTex.repeat.set(10, 10);
 
-    // Environment/Room
-    // Floor
     const floorGeo = new THREE.PlaneGeometry(10000, 10000);
-    const floorMat = new THREE.MeshStandardMaterial({ map: floorTex, color: 0x333333, roughness: 0.8 });
+    const floorMat = new THREE.MeshStandardMaterial({ map: floorTex, color: 0x666666, roughness: 0.7 });
     const floor = new THREE.Mesh(floorGeo, floorMat);
-    floor.rotation.x = -Math.PI / 2;
-    floor.position.y = -310;
-    floor.receiveShadow = true;
+    floor.rotation.x = -Math.PI / 2; floor.position.y = -310; floor.receiveShadow = true;
     scene.add(floor);
 
-    // Walls
     const wallGeo = new THREE.PlaneGeometry(10000, 4000);
-    const wallMat = new THREE.MeshStandardMaterial({ map: wallTex, color: 0x222222, roughness: 1 });
+    const wallMat = new THREE.MeshStandardMaterial({ map: wallTex, color: 0x444444, roughness: 1 });
     const backWall = new THREE.Mesh(wallGeo, wallMat);
     backWall.position.set(TABLE_WIDTH/2, 1000, -1000);
     scene.add(backWall);
 
-    // Modern Pub Lighting
-    const ambientLight = new THREE.AmbientLight(0xffffff, 0.3);
+    const ambientLight = new THREE.AmbientLight(0xffffff, 1.2);
     scene.add(ambientLight);
 
-    const tableLight = new THREE.SpotLight(0xffffff, 3);
-    tableLight.position.set(TABLE_WIDTH / 2, 600, TABLE_HEIGHT / 2);
-    tableLight.target.position.set(TABLE_WIDTH / 2, 0, TABLE_HEIGHT / 2);
-    tableLight.angle = Math.PI / 3;
-    tableLight.penumbra = 0.3;
-    tableLight.castShadow = true;
-    tableLight.shadow.mapSize.width = 2048;
-    tableLight.shadow.mapSize.height = 2048;
+    const tableLight = new THREE.SpotLight(0xffffff, 4.0);
+    tableLight.position.set(TABLE_WIDTH / 2, 700, TABLE_HEIGHT / 2);
+    tableLight.angle = Math.PI / 2.5; tableLight.penumbra = 0.2; tableLight.castShadow = true;
+    tableLight.shadow.mapSize.width = 4096; tableLight.shadow.mapSize.height = 4096;
     scene.add(tableLight);
-    scene.add(tableLight.target);
 
-    // Warm accent lights
-    const accent1 = new THREE.PointLight(0xffaa44, 2, 1500);
-    accent1.position.set(-500, 300, -200);
-    scene.add(accent1);
-    const accent2 = new THREE.PointLight(0xffaa44, 2, 1500);
-    accent2.position.set(TABLE_WIDTH + 500, 300, -200);
-    scene.add(accent2);
+    const frontLight = new THREE.DirectionalLight(0xffffff, 0.8);
+    frontLight.position.set(TABLE_WIDTH / 2, 500, 1000);
+    scene.add(frontLight);
 
-    // Table Materials
-    const feltMat = new THREE.MeshStandardMaterial({ map: feltTex, color: 0x1a4a1a, roughness: 0.9, metalness: 0.05 });
-    const woodMat = new THREE.MeshStandardMaterial({ map: woodTex, color: 0x3e2723, roughness: 0.6, metalness: 0.1 });
+    const feltMat = new THREE.MeshStandardMaterial({ map: feltTex, color: 0x388e3c, roughness: 0.8, metalness: 0.05 });
+    const woodMat = new THREE.MeshStandardMaterial({ map: woodTex, color: 0x5d4037, roughness: 0.5, metalness: 0.1 });
 
-    // Table Construction
     const tableGeo = new THREE.BoxGeometry(TABLE_WIDTH, 12, TABLE_HEIGHT);
     const table = new THREE.Mesh(tableGeo, feltMat);
-    table.position.set(TABLE_WIDTH / 2, -6, TABLE_HEIGHT / 2);
-    table.receiveShadow = true;
+    table.position.set(TABLE_WIDTH / 2, -6, TABLE_HEIGHT / 2); table.receiveShadow = true;
     scene.add(table);
 
     const createRail = (x: number, y: number, z: number, w: number, h: number, d: number) => {
         const geo = new THREE.BoxGeometry(w, h, d);
         const mesh = new THREE.Mesh(geo, woodMat);
-        mesh.position.set(x, y, z);
-        mesh.castShadow = true; mesh.receiveShadow = true;
+        mesh.position.set(x, y, z); mesh.castShadow = true; mesh.receiveShadow = true;
         scene.add(mesh);
     };
     createRail(TABLE_WIDTH / 2, 10, -WALL_THICKNESS / 2, TABLE_WIDTH + WALL_THICKNESS * 2, 30, WALL_THICKNESS);
@@ -206,62 +197,93 @@ const PoolGame: React.FC = () => {
     createRail(-WALL_THICKNESS / 2, 10, TABLE_HEIGHT / 2, WALL_THICKNESS, 30, TABLE_HEIGHT);
     createRail(TABLE_WIDTH + WALL_THICKNESS / 2, 10, TABLE_HEIGHT / 2, WALL_THICKNESS, 30, TABLE_HEIGHT);
 
-    // Visible Pockets
-    const pocketGeo = new THREE.CylinderGeometry(POCKET_RADIUS, POCKET_RADIUS, 10, 32);
-    const pocketMat = new THREE.MeshBasicMaterial({ color: 0x000000 });
-    const pocketsPos = [
-        {x:0, y:0}, {x:TABLE_WIDTH/2, y:0}, {x:TABLE_WIDTH, y:0},
-        {x:0, y:TABLE_HEIGHT}, {x:TABLE_WIDTH/2, y:TABLE_HEIGHT}, {x:TABLE_WIDTH, y:TABLE_HEIGHT}
-    ];
+    const pocketsPos = [ {x:0, y:0}, {x:TABLE_WIDTH/2, y:0}, {x:TABLE_WIDTH, y:0}, {x:0, y:TABLE_HEIGHT}, {x:TABLE_WIDTH/2, y:TABLE_HEIGHT}, {x:TABLE_WIDTH, y:TABLE_HEIGHT} ];
     pocketsPos.forEach(p => {
-        const mesh = new THREE.Mesh(pocketGeo, pocketMat);
-        mesh.position.set(p.x, -2, p.y);
-        scene.add(mesh);
+        const mesh = new THREE.Mesh(new THREE.CylinderGeometry(POCKET_RADIUS, POCKET_RADIUS, 10, 32), new THREE.MeshBasicMaterial({ color: 0x000000 }));
+        mesh.position.set(p.x, -2, p.y); scene.add(mesh);
     });
 
-    // Thick Square Legs
-    const legSize = 70;
-    const legGeo = new THREE.BoxGeometry(legSize, 300, legSize);
+    const legSize = 75; const legGeo = new THREE.BoxGeometry(legSize, 300, legSize);
     const createLeg = (x: number, z: number) => {
-      const leg = new THREE.Mesh(legGeo, woodMat);
-      leg.position.set(x, -155, z);
-      leg.castShadow = true;
-      scene.add(leg);
+      const leg = new THREE.Mesh(legGeo, woodMat); leg.position.set(x, -155, z); leg.castShadow = true; scene.add(leg);
     };
-    createLeg(30, 30); createLeg(TABLE_WIDTH - 30, 30);
-    createLeg(30, TABLE_HEIGHT - 30); createLeg(TABLE_WIDTH - 30, TABLE_HEIGHT - 30);
+    createLeg(30, 30); createLeg(TABLE_WIDTH - 30, 30); createLeg(30, TABLE_HEIGHT - 30); createLeg(TABLE_WIDTH - 30, TABLE_HEIGHT - 30);
 
-    // Balls
-    const ballGeo = new THREE.SphereGeometry(BALL_RADIUS, 32, 32);
     physicsBalls.forEach(body => {
       const mat = new THREE.MeshStandardMaterial({ map: createBallTexture((body as any).config, body.label === 'cueBall'), roughness: 0.1, metalness: 0.1 });
-      const mesh = new THREE.Mesh(ballGeo, mat);
-      mesh.castShadow = true;
-      scene.add(mesh);
+      const mesh = new THREE.Mesh(new THREE.SphereGeometry(BALL_RADIUS, 32, 32), mat);
+      mesh.castShadow = true; scene.add(mesh);
       balls3D.current.set(body.id, mesh);
     });
 
-    // Cue Stick
     const cueGroup = new THREE.Group();
     const cueStickGeo = new THREE.CylinderGeometry(2, 5, 450, 16);
     cueStickGeo.rotateX(Math.PI / 2); cueStickGeo.translate(0, 0, -240);
-    const cueStickMat = new THREE.MeshStandardMaterial({ map: woodTex, color: 0xd7ccc8 });
-    const cueStick = new THREE.Mesh(cueStickGeo, cueStickMat);
-    cueGroup.add(cueStick);
-    scene.add(cueGroup);
-    cueRef.current = cueGroup;
+    const cueStick = new THREE.Mesh(cueStickGeo, new THREE.MeshStandardMaterial({ map: woodTex, color: 0xffffff }));
+    cueGroup.add(cueStick); scene.add(cueGroup); cueRef.current = cueGroup;
 
     sceneRef.current = scene; cameraRef.current = camera; rendererRef.current = renderer;
   };
 
+  const handleShot = useCallback((angle: number, force: number) => {
+    if (!cueBallRef.current || isMovingRef.current) return;
+    
+    const apply = (a: number, f: number) => {
+      Matter.Body.applyForce(cueBallRef.current!, cueBallRef.current!.position, {
+        x: Math.cos(a) * f * 0.0015,
+        y: Math.sin(a) * f * 0.0015
+      });
+      setIsMyTurn(prev => !prev);
+    };
+
+    apply(angle, force);
+
+    if (gameMode === 'online' && channelRef.current) {
+      channelRef.current.publish('shot', { angle, force, clientId: clientId.current });
+    }
+  }, [gameMode]);
+
+  const syncBallePositions = (positions: any) => {
+    if (!engineRef.current) return;
+    positions.forEach((pos: any) => {
+      const ball = ballsRef.current.find(b => b.id === pos.id);
+      if (ball) {
+        Matter.Body.setPosition(ball, { x: pos.x, y: pos.y });
+        Matter.Body.setVelocity(ball, { x: pos.vx, y: pos.vy });
+      }
+    });
+  };
+
   useEffect(() => {
+    if (gameState !== 'playing') return;
+
     const { engine, cueBall, balls } = initPhysics();
     initThree(balls);
+
+    if (gameMode === 'online' && roomId) {
+      ablyRef.current = new Ably.Realtime({ key: ABLY_KEY, clientId: clientId.current });
+      channelRef.current = ablyRef.current.channels.get(`pool-${roomId}`);
+      
+      channelRef.current.subscribe('shot', (message) => {
+        if (message.clientId !== clientId.current) {
+          const { angle, force } = message.data;
+          Matter.Body.applyForce(cueBall, cueBall.position, {
+            x: Math.cos(angle) * force * 0.0015,
+            y: Math.sin(angle) * force * 0.0015
+          });
+          setIsMyTurn(true);
+        }
+      });
+
+      channelRef.current.subscribe('sync', (message) => {
+        if (role === 'client') syncBallePositions(message.data.balls);
+      });
+    }
 
     const animate = () => {
       Matter.Engine.update(engine, 1000 / 60);
       let moving = false;
-      balls.forEach(body => {
+      ballsRef.current.forEach(body => {
         const mesh = balls3D.current.get(body.id);
         if (mesh) {
           mesh.position.set(body.position.x, BALL_RADIUS, body.position.y);
@@ -271,28 +293,35 @@ const PoolGame: React.FC = () => {
             mesh.rotateOnWorldAxis(axis, body.speed / BALL_RADIUS);
           }
         }
-        const pockets = [
-            {x:0, y:0}, {x:TABLE_WIDTH/2, y:0}, {x:TABLE_WIDTH, y:0},
-            {x:0, y:TABLE_HEIGHT}, {x:TABLE_WIDTH/2, y:TABLE_HEIGHT}, {x:TABLE_WIDTH, y:TABLE_HEIGHT}
-        ];
+        const pockets = [ {x:0, y:0}, {x:TABLE_WIDTH/2, y:0}, {x:TABLE_WIDTH, y:0}, {x:0, y:TABLE_HEIGHT}, {x:TABLE_WIDTH/2, y:TABLE_HEIGHT}, {x:TABLE_WIDTH, y:TABLE_HEIGHT} ];
         pockets.forEach(p => {
-            const d = Math.sqrt((body.position.x-p.x)**2 + (body.position.y-p.y)**2);
-            if (d < POCKET_RADIUS) {
-                if (body.label === 'cueBall') {
-                    if (body.speed > 0.5) {
-                        Matter.Body.setPosition(body, {x: TABLE_WIDTH*0.25, y: TABLE_HEIGHT/2});
-                        Matter.Body.setVelocity(body, {x:0, y:0});
-                        playSound(pocketSound.current, 0.7);
-                    }
-                } else if (balls3D.current.has(body.id)) {
-                    const m = balls3D.current.get(body.id);
-                    if (m) { sceneRef.current?.remove(m); balls3D.current.delete(body.id); Matter.Composite.remove(engine.world, body); setScore(s => s + 10); playSound(pocketSound.current, 0.7); }
-                }
+          const d = Math.sqrt((body.position.x-p.x)**2 + (body.position.y-p.y)**2);
+          if (d < POCKET_RADIUS) {
+            if (body.label === 'cueBall') {
+              if (body.speed > 0.5) {
+                Matter.Body.setPosition(body, {x: TABLE_WIDTH*0.25, y: TABLE_HEIGHT/2});
+                Matter.Body.setVelocity(body, {x:0, y:0});
+                playSound(pocketSound.current, 0.7);
+              }
+            } else if (balls3D.current.has(body.id)) {
+              const m = balls3D.current.get(body.id);
+              if (m) { sceneRef.current?.remove(m); balls3D.current.delete(body.id); Matter.Composite.remove(engine.world, body); setScore(s => s + 10); playSound(pocketSound.current, 0.7); }
             }
+          }
         });
       });
-      if (moving !== isMovingRef.current) { isMovingRef.current = moving; setIsMoving(moving); }
-      if (cueRef.current && !isMovingRef.current && isAimingRef.current) {
+
+      if (moving !== isMovingRef.current) {
+        isMovingRef.current = moving;
+        setIsMoving(moving);
+        // Sync final positions when balls stop
+        if (!moving && gameMode === 'online' && role === 'host' && channelRef.current) {
+          const positions = ballsRef.current.map(b => ({ id: b.id, x: b.position.x, y: b.position.y, vx: b.velocity.x, vy: b.velocity.y }));
+          channelRef.current.publish('sync', { balls: positions });
+        }
+      }
+
+      if (cueRef.current && !isMovingRef.current && isAimingRef.current && isMyTurn) {
           const cb = cueBall.position;
           const dx = cb.x - mousePos.current.x, dy = cb.y - mousePos.current.y;
           const angle = Math.atan2(dy, dx), dist = Math.sqrt(dx*dx + dy*dy);
@@ -302,6 +331,7 @@ const PoolGame: React.FC = () => {
           cueRef.current.position.z -= Math.sin(angle) * (dist * 0.1);
           cueRef.current.visible = true;
       } else if (cueRef.current) cueRef.current.visible = false;
+
       rendererRef.current?.render(sceneRef.current!, cameraRef.current!);
       requestAnimationFrame(animate);
     };
@@ -316,15 +346,16 @@ const PoolGame: React.FC = () => {
         if (raycaster.ray.intersectPlane(new THREE.Plane(new THREE.Vector3(0, 1, 0), 0), target)) mousePos.current = { x: target.x, y: target.z };
     };
 
-    const handleMouseDown = () => { if (!isMovingRef.current) isAimingRef.current = true; };
+    const handleMouseDown = () => { if (!isMovingRef.current && isMyTurn) isAimingRef.current = true; };
     const handleMouseUp = () => {
         if (isAimingRef.current) {
             const dx = cueBall.position.x - mousePos.current.x, dy = cueBall.position.y - mousePos.current.y;
             const angle = Math.atan2(dy, dx), dist = Math.min(Math.sqrt(dx*dx + dy*dy), 250);
-            Matter.Body.applyForce(cueBall, cueBall.position, { x: Math.cos(angle) * dist * 0.0015, y: Math.sin(angle) * dist * 0.0015 });
+            handleShot(angle, dist);
             isAimingRef.current = false;
         }
     };
+
     window.addEventListener('mousemove', handleMouseMove);
     window.addEventListener('mousedown', handleMouseDown);
     window.addEventListener('mouseup', handleMouseUp);
@@ -334,8 +365,40 @@ const PoolGame: React.FC = () => {
         window.removeEventListener('mousedown', handleMouseDown);
         window.removeEventListener('mouseup', handleMouseUp);
         rendererRef.current?.dispose();
+        if (channelRef.current) channelRef.current.unsubscribe();
+        if (ablyRef.current) ablyRef.current.close();
     };
-  }, []);
+  }, [gameState, gameMode, roomId, role, isMyTurn, handleShot]);
+
+  if (gameState === 'menu') {
+    return (
+      <div className="w-full h-screen bg-[#111] flex items-center justify-center font-sans text-white">
+        <div className="bg-zinc-900 p-12 rounded-3xl border border-white/10 shadow-2xl flex flex-col gap-8 w-[400px]">
+          <h1 className="text-4xl font-black italic tracking-tighter text-center bg-gradient-to-r from-emerald-400 to-cyan-500 bg-clip-text text-transparent">8-BALL 3D</h1>
+          
+          <button onClick={() => { setGameMode('offline'); setGameState('playing'); }} 
+            className="bg-white/5 hover:bg-white/10 border border-white/10 p-6 rounded-2xl transition-all group">
+            <h2 className="text-xl font-bold">Modo Offline</h2>
+            <p className="text-xs text-white/40 mt-1">Jogue sozinho para treinar</p>
+          </button>
+
+          <div className="flex flex-col gap-4">
+            <h2 className="text-sm font-black text-emerald-500 uppercase tracking-widest text-center">Multiplayer</h2>
+            <input 
+              type="text" placeholder="Código da Sala" value={roomId} onChange={(e) => setRoomId(e.target.value)}
+              className="bg-black/50 border border-white/10 p-4 rounded-xl text-center font-mono text-xl focus:outline-none focus:border-emerald-500 transition-colors"
+            />
+            <div className="grid grid-cols-2 gap-4">
+              <button onClick={() => { if(!roomId) return; setGameMode('online'); setRole('host'); setGameState('playing'); }}
+                className="bg-emerald-500 hover:bg-emerald-600 p-4 rounded-xl font-bold transition-all disabled:opacity-50">Criar Sala</button>
+              <button onClick={() => { if(!roomId) return; setGameMode('online'); setRole('client'); setGameState('playing'); }}
+                className="bg-cyan-500 hover:bg-cyan-600 p-4 rounded-xl font-bold transition-all disabled:opacity-50">Entrar</button>
+            </div>
+          </div>
+        </div>
+      </div>
+    );
+  }
 
   return (
     <div className="relative w-full h-screen bg-black overflow-hidden font-sans">
@@ -348,11 +411,17 @@ const PoolGame: React.FC = () => {
           </div>
           <div className="w-px h-8 bg-white/10" />
           <div className="flex flex-col">
-            <span className="text-[10px] font-black text-emerald-500 uppercase tracking-widest opacity-50">Status</span>
-            <span className={`text-xs font-bold uppercase ${isMoving ? 'text-amber-500' : 'text-emerald-400'}`}>{isMoving ? 'Rolling...' : 'Ready'}</span>
+            <span className="text-[10px] font-black text-emerald-500 uppercase tracking-widest opacity-50">Turno</span>
+            <span className={`text-xs font-bold uppercase ${isMyTurn ? 'text-emerald-400' : 'text-amber-500'}`}>{isMyTurn ? 'Sua Vez' : 'Oponente'}</span>
+          </div>
+          <div className="w-px h-8 bg-white/10" />
+          <div className="flex flex-col">
+            <span className="text-[10px] font-black text-emerald-500 uppercase tracking-widest opacity-50">Sala</span>
+            <span className="text-xs font-bold uppercase text-white">{gameMode === 'online' ? roomId : 'LOCAL'}</span>
           </div>
         </div>
       </div>
+      <button onClick={() => { setGameState('menu'); if(ablyRef.current) ablyRef.current.close(); }} className="absolute bottom-8 right-8 bg-white/5 hover:bg-white/10 border border-white/10 px-6 py-3 rounded-xl text-white font-bold text-xs uppercase transition-all z-20">Sair do Jogo</button>
       <div className="absolute bottom-8 left-8 text-white/20 text-[10px] font-black uppercase tracking-[0.3em]">Full 3D Real-Time Physics Engine</div>
     </div>
   );
