@@ -12,7 +12,7 @@ const BALL_RADIUS = 10;
 const WALL_THICKNESS = 40;
 const POCKET_RADIUS = 18;
 
-const ABLY_KEY = 'w9w0hQ.SielQA:rM9oV-3hJtQChQuhDngQa-TuNexXDlVcd6n82GcvDCA';
+const ABLY_KEY = 'w9w0hQ.5s_Acg:eEtUnGIX3Ei1O47iF8OFqnogXdGDcSRFn6vAGnB-uac';
 
 const ballConfigs = [
   { n: 1, c: '#ffeb3b', s: false }, { n: 2, c: '#1976d2', s: false },
@@ -46,7 +46,7 @@ const PoolGame: React.FC = () => {
   const hitSound = useRef<HTMLAudioElement | null>(null);
   const pocketSound = useRef<HTMLAudioElement | null>(null);
 
-  const [gameState, setGameState] = useState<'menu' | 'playing'>('menu');
+  const [gameState, setGameState] = useState<'menu' | 'waiting' | 'playing'>('menu');
   const [gameMode, setGameMode] = useState<'offline' | 'online'>('offline');
   const [roomId, setRoomId] = useState('');
   const [role, setRole] = useState<'host' | 'client'>('host');
@@ -56,10 +56,17 @@ const PoolGame: React.FC = () => {
   const isAimingRef = useRef(false);
   const mousePos = useRef({ x: 0, y: 0 });
   const [isMyTurn, setIsMyTurn] = useState(true);
-  const isMyTurnRef = useRef(true); // Ref to avoid effect restart
+  const isMyTurnRef = useRef(true);
   const [publicRooms, setPublicRooms] = useState<Array<{ id: string, players: number }>>([]);
   const [connectionStatus, setConnectionStatus] = useState<'connected' | 'connecting' | 'disconnected'>('disconnected');
+  const [onlinePlayerCount, setOnlinePlayerCount] = useState(1);
 
+  // Sync turn state with ref
+  useEffect(() => {
+    isMyTurnRef.current = isMyTurn;
+  }, [isMyTurn]);
+
+  // Initial Setup
   useEffect(() => {
     hitSound.current = new Audio('/assets/sounds/hit.mp3');
     pocketSound.current = new Audio('/assets/sounds/pocket.mp3');
@@ -70,7 +77,6 @@ const PoolGame: React.FC = () => {
     ably.connection.on('connected', () => setConnectionStatus('connected'));
     ably.connection.on('connecting', () => setConnectionStatus('connecting'));
     ably.connection.on('disconnected', () => setConnectionStatus('disconnected'));
-    ably.connection.on('failed', () => setConnectionStatus('disconnected'));
 
     const lobby = ably.channels.get('public:pool-lobby');
     lobbyChannelRef.current = lobby;
@@ -84,6 +90,14 @@ const PoolGame: React.FC = () => {
             return filtered;
         });
     });
+
+    const hash = window.location.hash;
+    if (hash && hash.startsWith('#room-')) {
+        setRoomId(hash.replace('#room-', ''));
+        setRole('client');
+        setGameMode('online');
+        setGameState('waiting');
+    }
 
     return () => {
         lobby.unsubscribe();
@@ -108,34 +122,28 @@ const PoolGame: React.FC = () => {
       createWall(-WALL_THICKNESS / 2, TABLE_HEIGHT / 2, WALL_THICKNESS, TABLE_HEIGHT + WALL_THICKNESS * 2),
       createWall(TABLE_WIDTH + WALL_THICKNESS / 2, TABLE_HEIGHT / 2, WALL_THICKNESS, TABLE_HEIGHT + WALL_THICKNESS * 2),
     ];
-
     const balls: Matter.Body[] = [];
     const cueBall = Matter.Bodies.circle(TABLE_WIDTH * 0.25, TABLE_HEIGHT / 2, BALL_RADIUS, {
       restitution: 0.95, friction: 0.001, frictionAir: 0.012, mass: 6, label: 'cueBall'
     });
     cueBallRef.current = cueBall;
     balls.push(cueBall);
-
     const startX = TABLE_WIDTH * 0.7;
     const startY = TABLE_HEIGHT / 2;
     let ballIdx = 0;
     for (let row = 0; row < 5; row++) {
       for (let col = 0; col <= row; col++) {
-        const x = startX + row * (BALL_RADIUS * 1.75);
-        const y = startY + (col - row / 2) * (BALL_RADIUS * 2.1);
-        const ball = Matter.Bodies.circle(x, y, BALL_RADIUS, { restitution: 0.95, friction: 0.001, frictionAir: 0.012, mass: 3, label: 'ball' });
+        const ball = Matter.Bodies.circle(startX + row * (BALL_RADIUS * 1.75), startY + (col - row / 2) * (BALL_RADIUS * 2.1), BALL_RADIUS, { restitution: 0.95, friction: 0.001, frictionAir: 0.012, mass: 3, label: 'ball' });
         (ball as any).config = ballConfigs[ballIdx++];
         balls.push(ball);
       }
     }
-
     Matter.Events.on(engine, 'collisionStart', (event) => {
       event.pairs.forEach((pair) => {
         const speed = pair.collision.depth * 5;
         if (speed > 0.1) playSound(hitSound.current, Math.min(speed, 1));
       });
     });
-
     Matter.Composite.add(engine.world, [...walls, ...balls]);
     engineRef.current = engine;
     ballsRef.current = balls;
@@ -166,13 +174,11 @@ const PoolGame: React.FC = () => {
     const camera = new THREE.PerspectiveCamera(45, window.innerWidth / window.innerHeight, 1, 10000);
     camera.position.set(TABLE_WIDTH / 2, 750, TABLE_HEIGHT / 2 + 650);
     camera.lookAt(TABLE_WIDTH / 2, -50, TABLE_HEIGHT / 2);
-
     const renderer = new THREE.WebGLRenderer({ antialias: true });
     renderer.setSize(window.innerWidth, window.innerHeight);
     renderer.shadowMap.enabled = true;
-    renderer.shadowMap.type = THREE.PCFShadowMap; 
+    renderer.shadowMap.type = THREE.PCFShadowMap;
     containerRef.current?.appendChild(renderer.domElement);
-
     const texLoader = new THREE.TextureLoader();
     const feltTex = texLoader.load('/assets/textures/felt.jpg');
     feltTex.wrapS = feltTex.wrapT = THREE.RepeatWrapping; feltTex.repeat.set(4, 2);
@@ -182,40 +188,32 @@ const PoolGame: React.FC = () => {
     wallTex.wrapS = wallTex.wrapT = THREE.RepeatWrapping; wallTex.repeat.set(5, 3);
     const floorTex = texLoader.load('/assets/textures/floor.jpg');
     floorTex.wrapS = floorTex.wrapT = THREE.RepeatWrapping; floorTex.repeat.set(10, 10);
-
     const floorGeo = new THREE.PlaneGeometry(10000, 10000);
     const floorMat = new THREE.MeshStandardMaterial({ map: floorTex, color: 0x666666, roughness: 0.7 });
     const floor = new THREE.Mesh(floorGeo, floorMat);
     floor.rotation.x = -Math.PI / 2; floor.position.y = -310; floor.receiveShadow = true;
     scene.add(floor);
-
     const wallGeo = new THREE.PlaneGeometry(10000, 4000);
     const wallMat = new THREE.MeshStandardMaterial({ map: wallTex, color: 0x444444, roughness: 1 });
     const backWall = new THREE.Mesh(wallGeo, wallMat);
     backWall.position.set(TABLE_WIDTH/2, 1000, -1000);
     scene.add(backWall);
-
     const ambientLight = new THREE.AmbientLight(0xffffff, 1.2);
     scene.add(ambientLight);
-
     const tableLight = new THREE.SpotLight(0xffffff, 4.0);
     tableLight.position.set(TABLE_WIDTH / 2, 700, TABLE_HEIGHT / 2);
     tableLight.angle = Math.PI / 2.5; tableLight.penumbra = 0.2; tableLight.castShadow = true;
     tableLight.shadow.mapSize.width = 4096; tableLight.shadow.mapSize.height = 4096;
     scene.add(tableLight);
-
     const frontLight = new THREE.DirectionalLight(0xffffff, 0.8);
     frontLight.position.set(TABLE_WIDTH / 2, 500, 1000);
     scene.add(frontLight);
-
     const feltMat = new THREE.MeshStandardMaterial({ map: feltTex, color: 0x388e3c, roughness: 0.8, metalness: 0.05 });
     const woodMat = new THREE.MeshStandardMaterial({ map: woodTex, color: 0x5d4037, roughness: 0.5, metalness: 0.1 });
-
     const tableGeo = new THREE.BoxGeometry(TABLE_WIDTH, 12, TABLE_HEIGHT);
     const table = new THREE.Mesh(tableGeo, feltMat);
     table.position.set(TABLE_WIDTH / 2, -6, TABLE_HEIGHT / 2); table.receiveShadow = true;
     scene.add(table);
-
     const createRail = (x: number, y: number, z: number, w: number, h: number, d: number) => {
         const geo = new THREE.BoxGeometry(w, h, d);
         const mesh = new THREE.Mesh(geo, woodMat);
@@ -226,33 +224,28 @@ const PoolGame: React.FC = () => {
     createRail(TABLE_WIDTH / 2, 10, TABLE_HEIGHT + WALL_THICKNESS / 2, TABLE_WIDTH + WALL_THICKNESS * 2, 30, WALL_THICKNESS);
     createRail(-WALL_THICKNESS / 2, 10, TABLE_HEIGHT / 2, WALL_THICKNESS, 30, TABLE_HEIGHT);
     createRail(TABLE_WIDTH + WALL_THICKNESS / 2, 10, TABLE_HEIGHT / 2, WALL_THICKNESS, 30, TABLE_HEIGHT);
-
     const pocketsPos = [ {x:0, y:0}, {x:TABLE_WIDTH/2, y:0}, {x:TABLE_WIDTH, y:0}, {x:0, y:TABLE_HEIGHT}, {x:TABLE_WIDTH/2, y:TABLE_HEIGHT}, {x:TABLE_WIDTH, y:TABLE_HEIGHT} ];
     pocketsPos.forEach(p => {
         const mesh = new THREE.Mesh(new THREE.CylinderGeometry(POCKET_RADIUS, POCKET_RADIUS, 10, 32), new THREE.MeshBasicMaterial({ color: 0x000000 }));
         mesh.position.set(p.x, -2, p.y); scene.add(mesh);
     });
-
     const legSize = 75; const legGeo = new THREE.BoxGeometry(legSize, 300, legSize);
     const createLeg = (x: number, z: number) => {
       const leg = new THREE.Mesh(legGeo, woodMat); leg.position.set(x, -155, z); leg.castShadow = true; scene.add(leg);
     };
     createLeg(30, 30); createLeg(TABLE_WIDTH - 30, 30);
     createLeg(30, TABLE_HEIGHT - 30); createLeg(TABLE_WIDTH - 30, TABLE_HEIGHT - 30);
-
     physicsBalls.forEach(body => {
       const mat = new THREE.MeshStandardMaterial({ map: createBallTexture((body as any).config, body.label === 'cueBall'), roughness: 0.1, metalness: 0.1 });
       const mesh = new THREE.Mesh(new THREE.SphereGeometry(BALL_RADIUS, 32, 32), mat);
       mesh.castShadow = true; scene.add(mesh);
       balls3D.current.set(body.id, mesh);
     });
-
     const cueGroup = new THREE.Group();
     const cueStickGeo = new THREE.CylinderGeometry(2, 5, 450, 16);
     cueStickGeo.rotateX(Math.PI / 2); cueStickGeo.translate(0, 0, -240);
     const cueStick = new THREE.Mesh(cueStickGeo, new THREE.MeshStandardMaterial({ map: woodTex, color: 0xffffff }));
     cueGroup.add(cueStick); scene.add(cueGroup); cueRef.current = cueGroup;
-
     sceneRef.current = scene; cameraRef.current = camera; rendererRef.current = renderer;
   };
 
@@ -268,37 +261,58 @@ const PoolGame: React.FC = () => {
   };
 
   useEffect(() => {
+    if (gameState === 'waiting') {
+        const ably = ablyRef.current || new Ably.Realtime({ key: ABLY_KEY, clientId: clientId.current });
+        ablyRef.current = ably;
+        const channel = ably.channels.get(`public:pool-${roomId}`);
+        channelRef.current = channel;
+        
+        // Listen for game-start message from host
+        channel.subscribe('game-start', () => {
+            setGameState('playing');
+            if (role === 'client') setIsMyTurn(false); // Host goes first
+        });
+
+        channel.presence.enter();
+        channel.presence.subscribe(() => {
+            channel.presence.get((err, members) => {
+                if (!err) {
+                    const count = members?.length || 1;
+                    setOnlinePlayerCount(count);
+                    // Automatic start for both if count is 2 (Host sends signal)
+                    if (count >= 2 && role === 'host') {
+                        channel.publish('game-start', {});
+                    }
+                }
+            });
+        });
+
+        const lobby = ably.channels.get('public:pool-lobby');
+        const announce = () => { lobby.publish('room-announce', { id: roomId, players: onlinePlayerCount }).catch(() => {}); };
+        const interval = setInterval(announce, 3000);
+        announce();
+
+        return () => {
+            clearInterval(interval);
+            channel.presence.unsubscribe();
+            channel.unsubscribe('game-start');
+        };
+    }
+
     if (gameState !== 'playing') return;
 
     const { engine, cueBall, balls } = initPhysics();
     initThree(balls);
 
-    const cleanupOnline = () => {
-        if (ablyRef.current) ablyRef.current.close();
-        if (channelRef.current) channelRef.current.unsubscribe();
-    };
-
     if (gameMode === 'online' && roomId) {
-      const ably = new Ably.Realtime({ key: ABLY_KEY, clientId: clientId.current });
-      ablyRef.current = ably;
-      const channel = ably.channels.get(`public:pool-${roomId}`);
-      channelRef.current = channel;
-      
-      const lobby = ably.channels.get('public:pool-lobby');
-      
-      const announce = () => { lobby.publish('room-announce', { id: roomId, players: 1 }).catch(() => {}); };
-      const interval = setInterval(announce, 5000);
-      announce();
-
+      const channel = channelRef.current!;
       channel.subscribe('shot', (message) => {
         if (message.clientId !== clientId.current) {
           const { angle, force } = message.data;
           Matter.Body.applyForce(cueBall, cueBall.position, { x: Math.cos(angle) * force * 0.0015, y: Math.sin(angle) * force * 0.0015 });
-          isMyTurnRef.current = true;
           setIsMyTurn(true);
         }
       });
-
       channel.subscribe('sync', (message) => {
         if (role === 'client') syncBallPositions(message.data.balls);
       });
@@ -334,7 +348,6 @@ const PoolGame: React.FC = () => {
           }
         });
       });
-
       if (moving !== isMovingRef.current) {
         isMovingRef.current = moving;
         setIsMoving(moving);
@@ -343,7 +356,6 @@ const PoolGame: React.FC = () => {
           channelRef.current.publish('sync', { balls: positions });
         }
       }
-
       if (cueRef.current && !isMovingRef.current && isAimingRef.current && isMyTurnRef.current) {
           const cb = cueBall.position;
           const dx = cb.x - mousePos.current.x, dy = cb.y - mousePos.current.y;
@@ -367,52 +379,39 @@ const PoolGame: React.FC = () => {
         const target = new THREE.Vector3();
         if (raycaster.ray.intersectPlane(new THREE.Plane(new THREE.Vector3(0, 1, 0), 0), target)) mousePos.current = { x: target.x, y: target.z };
     };
-
     const handleMouseDown = () => { if (!isMovingRef.current && isMyTurnRef.current) isAimingRef.current = true; };
     const handleMouseUp = () => {
         if (isAimingRef.current) {
             const dx = cueBall.position.x - mousePos.current.x, dy = cueBall.position.y - mousePos.current.y;
             const angle = Math.atan2(dy, dx), dist = Math.min(Math.sqrt(dx*dx + dy*dy), 250);
-            
-            // Execute shot
             Matter.Body.applyForce(cueBall, cueBall.position, { x: Math.cos(angle) * dist * 0.0015, y: Math.sin(angle) * dist * 0.0015 });
-            
             if (gameMode === 'online') {
-                isMyTurnRef.current = false;
                 setIsMyTurn(false);
-                if (channelRef.current) {
-                    channelRef.current.publish('shot', { angle, dist, clientId: clientId.current });
-                }
-            } else {
-                isMyTurnRef.current = true;
-                setIsMyTurn(true);
-            }
-
+                if (channelRef.current) channelRef.current.publish('shot', { angle, dist, clientId: clientId.current });
+            } else { setIsMyTurn(true); }
             isAimingRef.current = false;
         }
     };
-
     window.addEventListener('mousemove', handleMouseMove);
     window.addEventListener('mousedown', handleMouseDown);
     window.addEventListener('mouseup', handleMouseUp);
     const animId = requestAnimationFrame(animate);
-
     return () => {
         window.removeEventListener('mousemove', handleMouseMove);
         window.removeEventListener('mousedown', handleMouseDown);
         window.removeEventListener('mouseup', handleMouseUp);
         cancelAnimationFrame(animId);
         rendererRef.current?.dispose();
-        cleanupOnline();
     };
   }, [gameState, gameMode, roomId, role]);
+
+  const shareUrl = typeof window !== 'undefined' ? `${window.location.origin}${window.location.pathname}#room-${roomId}` : '';
 
   if (gameState === 'menu') {
     return (
       <div className="w-full h-screen bg-[#0a0a0a] flex items-center justify-center font-sans text-white overflow-hidden relative">
         <div className="absolute top-[-10%] left-[-10%] w-[40%] h-[40%] bg-emerald-500/10 blur-[120px] rounded-full animate-pulse" />
         <div className="absolute bottom-[-10%] right-[-10%] w-[40%] h-[40%] bg-cyan-500/10 blur-[120px] rounded-full" />
-        
         <div className="relative z-10 flex flex-col md:flex-row gap-8 w-full max-w-6xl px-8 h-[600px]">
           <div className="flex-1 bg-zinc-900/50 backdrop-blur-3xl border border-white/5 p-10 rounded-[40px] shadow-2xl flex flex-col justify-between">
             <div>
@@ -422,82 +421,75 @@ const PoolGame: React.FC = () => {
                 </div>
                 <span className="text-emerald-500 font-black uppercase tracking-[0.3em] text-[10px]">Real-Time 3D</span>
               </div>
-              <h1 className="text-7xl font-black italic tracking-tighter leading-none mb-8">
-                8-BALL <br /> <span className="bg-gradient-to-r from-white to-white/40 bg-clip-text text-transparent underline decoration-emerald-500/50 underline-offset-8">ONLINE</span>
-              </h1>
-              
-              <button onClick={() => { setGameMode('offline'); setGameState('playing'); }} 
-                className="w-full group relative bg-white/[0.03] hover:bg-emerald-500 border border-white/5 hover:border-emerald-400 p-8 rounded-3xl transition-all duration-500 text-left overflow-hidden text-white">
-                <div className="absolute right-[-20px] bottom-[-20px] opacity-10 group-hover:opacity-20 transition-opacity">
-                    <div className="w-32 h-32 border-8 border-white rounded-full" />
+              <h1 className="text-7xl font-black italic tracking-tighter leading-none mb-8">8-BALL <br /> <span className="bg-gradient-to-r from-white to-white/40 bg-clip-text text-transparent underline decoration-emerald-500/50 underline-offset-8">ONLINE</span></h1>
+              <div className="flex items-center gap-4 mb-8">
+                <div className="flex-1 bg-white/[0.03] border border-white/5 px-4 py-2 rounded-xl flex items-center justify-between">
+                  <span className="text-[10px] font-black text-white/30 uppercase tracking-widest">Network Status</span>
+                  <div className="flex items-center gap-2">
+                    <div className={`w-2 h-2 rounded-full ${connectionStatus === 'connected' ? 'bg-emerald-500 shadow-[0_0_10px_#10b981]' : connectionStatus === 'connecting' ? 'bg-amber-500 animate-pulse' : 'bg-red-500'}`} />
+                    <span className={`text-[10px] font-black uppercase ${connectionStatus === 'connected' ? 'text-emerald-500' : connectionStatus === 'connecting' ? 'text-amber-500' : 'text-red-500'}`}>{connectionStatus}</span>
+                  </div>
                 </div>
-                <h2 className="text-3xl font-black italic group-hover:translate-x-2 transition-transform duration-500">PRATICAR</h2>
-                <p className="text-sm text-white/40 group-hover:text-white/80 group-hover:translate-x-2 transition-all duration-500 delay-75">Modo offline com física autoritativa</p>
-              </button>
+              </div>
+              <button onClick={() => { setGameMode('offline'); setGameState('playing'); }} className="w-full group relative bg-white/[0.03] hover:bg-emerald-500 border border-white/5 hover:border-emerald-400 p-8 rounded-3xl transition-all duration-500 text-left overflow-hidden text-white"><h2 className="text-3xl font-black italic group-hover:translate-x-2 transition-transform duration-500">PRATICAR</h2><p className="text-sm text-white/40 group-hover:text-white/80 group-hover:translate-x-2 transition-all duration-500 delay-75">Modo offline com física autoritativa</p></button>
             </div>
-
             <div className="flex flex-col gap-4">
               <div className="h-px bg-gradient-to-r from-transparent via-white/10 to-transparent" />
               <div className="flex items-center gap-4">
-                <input 
-                  type="text" placeholder="NOME DA SALA..." value={roomId} onChange={(e) => setRoomId(e.target.value)}
-                  className="flex-1 bg-black/40 border border-white/5 p-6 rounded-2xl text-center font-black text-xl placeholder:text-white/10 focus:outline-none focus:border-emerald-500/50 focus:bg-black/60 transition-all uppercase tracking-wider text-white"
-                />
-                <button onClick={() => { if(!roomId) return; setGameMode('online'); setRole('host'); setGameState('playing'); }}
-                  disabled={!roomId}
-                  className="bg-emerald-500 hover:bg-emerald-400 disabled:opacity-20 disabled:grayscale px-10 rounded-2xl font-black text-black transition-all shadow-[0_0_30px_rgba(16,185,129,0.3)] active:scale-95 h-[72px]">
-                  CRIAR
-                </button>
+                <input type="text" placeholder="NOME DA SALA..." value={roomId} onChange={(e) => setRoomId(e.target.value)} className="flex-1 bg-black/40 border border-white/5 p-6 rounded-2xl text-center font-black text-xl placeholder:text-white/10 focus:outline-none focus:border-emerald-500/50 focus:bg-black/60 transition-all uppercase tracking-wider text-white" />
+                <button onClick={() => { if(!roomId) return; setGameMode('online'); setRole('host'); setIsMyTurn(true); setGameState('waiting'); }} disabled={!roomId} className="bg-emerald-500 hover:bg-emerald-400 disabled:opacity-20 disabled:grayscale px-10 rounded-2xl font-black text-black transition-all shadow-[0_0_30px_rgba(16,185,129,0.3)] active:scale-95 h-[72px]">CRIAR</button>
               </div>
             </div>
           </div>
-
           <div className="w-full md:w-[380px] bg-black/40 backdrop-blur-2xl border border-white/5 rounded-[40px] flex flex-col overflow-hidden">
-            <div className="p-8 border-b border-white/5 flex items-center justify-between bg-white/[0.02]">
-                <h3 className="font-black text-sm uppercase tracking-widest text-white/60 flex items-center gap-2">
-                    <span className="w-2 h-2 bg-emerald-500 rounded-full animate-ping" />
-                    Salas Públicas
-                </h3>
-                <span className="text-[10px] font-bold bg-white/10 px-2 py-1 rounded-md text-white/40">{publicRooms.length} ATIVAS</span>
-            </div>
-            
+            <div className="p-8 border-b border-white/5 flex items-center justify-between bg-white/[0.02]"><h3 className="font-black text-sm uppercase tracking-widest text-white/60 flex items-center gap-2"><span className="w-2 h-2 bg-emerald-500 rounded-full animate-ping" />Salas Públicas</h3><span className="text-[10px] font-bold bg-white/10 px-2 py-1 rounded-md text-white/40">{publicRooms.length} ATIVAS</span></div>
             <div className="flex-1 overflow-y-auto p-4 flex flex-col gap-3 custom-scrollbar">
                 {publicRooms.length === 0 ? (
-                    <div className="flex-1 flex flex-col items-center justify-center text-center p-8 opacity-20">
-                        <div className="w-12 h-12 border-2 border-dashed border-white rounded-full mb-4 animate-spin-slow" />
-                        <p className="text-xs font-bold uppercase tracking-widest leading-relaxed">Nenhuma sala encontrada<br/>Crie a sua agora!</p>
-                    </div>
+                    <div className="flex-1 flex flex-col items-center justify-center text-center p-8 opacity-20"><div className="w-12 h-12 border-2 border-dashed border-white rounded-full mb-4 animate-spin-slow" /><p className="text-xs font-bold uppercase tracking-widest leading-relaxed">Nenhuma sala encontrada<br/>Crie a sua agora!</p></div>
                 ) : (
                     publicRooms.map(room => (
-                        <button key={room.id} 
-                            onClick={() => { setRoomId(room.id); setRole('client'); setGameMode('online'); setGameState('playing'); }}
-                            className="w-full bg-white/[0.03] hover:bg-white/[0.08] border border-white/5 p-5 rounded-2xl flex items-center justify-between group transition-all text-white">
-                            <div className="text-left">
-                                <p className="text-xs font-black text-emerald-500 uppercase tracking-widest mb-1">Sala</p>
-                                <p className="font-bold text-lg truncate w-[180px]">{room.id}</p>
-                            </div>
-                            <div className="flex flex-col items-end gap-2">
-                                <div className="flex gap-1">
-                                    {[...Array(room.players)].map((_, i) => <div key={i} className="w-2 h-2 bg-emerald-500 rounded-full" />)}
-                                    {[...Array(2 - room.players)].map((_, i) => <div key={i} className="w-2 h-2 bg-white/10 rounded-full" />)}
-                                </div>
-                                <span className="text-[10px] font-black group-hover:text-emerald-400 transition-colors uppercase tracking-widest">ENTRAR →</span>
-                            </div>
-                        </button>
+                        <button key={room.id} onClick={() => { setRoomId(room.id); setRole('client'); setIsMyTurn(false); setGameMode('online'); setGameState('waiting'); }} className="w-full bg-white/[0.03] hover:bg-white/[0.08] border border-white/5 p-5 rounded-2xl flex items-center justify-between group transition-all text-white"><div className="text-left"><p className="text-xs font-black text-emerald-500 uppercase tracking-widest mb-1">Sala</p><p className="font-bold text-lg truncate w-[180px]">{room.id}</p></div><div className="flex flex-col items-end gap-2"><div className="flex gap-1">{[...Array(room.players)].map((_, i) => <div key={i} className="w-2 h-2 bg-emerald-500 rounded-full" />)}{[...Array(2 - room.players)].map((_, i) => <div key={i} className="w-2 h-2 bg-white/10 rounded-full" />)}</div><span className="text-[10px] font-black group-hover:text-emerald-400 transition-colors uppercase tracking-widest">ENTRAR →</span></div></button>
                     ))
                 )}
             </div>
           </div>
         </div>
-        
-        <style jsx global>{`
-            .custom-scrollbar::-webkit-scrollbar { width: 4px; }
-            .custom-scrollbar::-webkit-scrollbar-track { background: transparent; }
-            .custom-scrollbar::-webkit-scrollbar-thumb { background: rgba(255,255,255,0.1); border-radius: 10px; }
-            @keyframes spin-slow { from { transform: rotate(0deg); } to { transform: rotate(360deg); } }
-            .animate-spin-slow { animation: spin-slow 8s linear infinite; }
-        `}</style>
+        <style jsx global>{`.custom-scrollbar::-webkit-scrollbar { width: 4px; } .custom-scrollbar::-webkit-scrollbar-track { background: transparent; } .custom-scrollbar::-webkit-scrollbar-thumb { background: rgba(255,255,255,0.1); border-radius: 10px; } @keyframes spin-slow { from { transform: rotate(0deg); } to { transform: rotate(360deg); } } .animate-spin-slow { animation: spin-slow 8s linear infinite; }`}</style>
       </div>
+    );
+  }
+
+  if (gameState === 'waiting') {
+    return (
+        <div className="w-full h-screen bg-[#0a0a0a] flex items-center justify-center font-sans text-white overflow-hidden relative">
+            <div className="bg-zinc-900/50 backdrop-blur-3xl border border-white/5 p-12 rounded-[40px] shadow-2xl flex flex-col items-center text-center max-w-lg w-full mx-6">
+                <div className="w-20 h-20 border-4 border-emerald-500/20 border-t-emerald-500 rounded-full animate-spin mb-8" />
+                <h2 className="text-3xl font-black italic tracking-tight mb-2 uppercase">Aguardando Oponente</h2>
+                <p className="text-white/40 text-sm mb-8 uppercase tracking-widest font-bold">Sala: {roomId}</p>
+                
+                <div className="bg-black/40 border border-white/5 p-6 rounded-3xl w-full mb-8">
+                    <p className="text-[10px] font-black text-emerald-500 uppercase tracking-widest mb-4">Link de Convite</p>
+                    <input readOnly value={shareUrl} className="w-full bg-white/[0.03] border border-white/10 p-4 rounded-xl text-center text-xs font-mono mb-4 focus:outline-none" />
+                    <button onClick={() => navigator.clipboard.writeText(shareUrl)} className="text-[10px] font-black uppercase tracking-widest bg-emerald-500 text-black px-6 py-3 rounded-xl hover:bg-emerald-400 transition-all">Copiar Link</button>
+                </div>
+
+                <div className="flex flex-col gap-6 items-center mb-8 w-full">
+                    <div className="flex gap-4 items-center">
+                        <div className="flex gap-1">
+                            <div className="w-3 h-3 bg-emerald-500 rounded-full" />
+                            <div className={`w-3 h-3 rounded-full ${onlinePlayerCount >= 2 ? 'bg-emerald-500' : 'bg-white/10 animate-pulse'}`} />
+                        </div>
+                        <span className="text-xs font-bold text-white/60 uppercase">{onlinePlayerCount}/2 Jogadores</span>
+                    </div>
+
+                    {role === 'host' && onlinePlayerCount >= 2 && (
+                        <button onClick={() => channelRef.current?.publish('game-start', {})} className="w-full bg-white text-black font-black py-4 rounded-2xl hover:bg-emerald-400 transition-all animate-bounce">COMEÇAR PARTIDA AGORA</button>
+                    )}
+                </div>
+
+                <button onClick={() => setGameState('menu')} className="text-[10px] font-black text-white/20 hover:text-red-400 uppercase tracking-[0.2em] transition-colors">Cancelar e Sair</button>
+            </div>
+        </div>
     );
   }
 
@@ -506,43 +498,15 @@ const PoolGame: React.FC = () => {
       <div ref={containerRef} className="absolute inset-0" />
       <div className="absolute top-8 left-1/2 -translate-x-1/2 flex gap-8 items-center z-20">
         <div className="bg-zinc-900/80 backdrop-blur-xl border border-white/10 px-6 py-3 rounded-2xl shadow-2xl flex items-center gap-6">
-          <div className="flex flex-col">
-            <span className="text-[10px] font-black text-emerald-500 uppercase tracking-widest opacity-50">Score</span>
-            <span className="text-2xl font-mono font-bold text-white">{score.toString().padStart(4, '0')}</span>
-          </div>
-          <div className="w-px h-8 bg-white/10" />
-          <div className="flex flex-col text-center min-w-[80px]">
-            <span className="text-[10px] font-black text-emerald-500 uppercase tracking-widest opacity-50">Turno</span>
-            <span className={`text-xs font-bold uppercase ${isMyTurn ? 'text-emerald-400' : 'text-amber-500'}`}>{isMyTurn ? 'Sua Vez' : 'Oponente'}</span>
-          </div>
-          <div className="w-px h-8 bg-white/10" />
-          <div className="flex flex-col text-center">
-            <span className="text-[10px] font-black text-emerald-500 uppercase tracking-widest opacity-50">Sala</span>
-            <span className="text-xs font-bold uppercase text-white truncate max-w-[100px]">{gameMode === 'online' ? roomId : 'LOCAL'}</span>
-          </div>
+          <div className="flex flex-col"><span className="text-[10px] font-black text-emerald-500 uppercase tracking-widest opacity-50">Score</span><span className="text-2xl font-mono font-bold text-white">{score.toString().padStart(4, '0')}</span></div>
+          <div className="w-px h-8 bg-white/10" /><div className="flex flex-col text-center min-w-[80px]"><span className="text-[10px] font-black text-emerald-500 uppercase tracking-widest opacity-50">Turno</span><span className={`text-xs font-bold uppercase ${isMyTurn ? 'text-emerald-400' : 'text-amber-500'}`}>{isMyTurn ? 'Sua Vez' : 'Oponente'}</span></div>
+          <div className="w-px h-8 bg-white/10" /><div className="flex flex-col text-center"><span className="text-[10px] font-black text-emerald-500 uppercase tracking-widest opacity-50">Sala</span><span className="text-xs font-bold uppercase text-white truncate max-w-[100px]">{gameMode === 'online' ? roomId : 'LOCAL'}</span></div>
           {gameMode === 'online' && (
-            <>
-              <div className="w-px h-8 bg-white/10" />
-              <div className="flex flex-col items-center">
-                <span className="text-[10px] font-black text-emerald-500 uppercase tracking-widest opacity-50">Rede</span>
-                <div className="flex items-center gap-1.5 mt-1">
-                  <div className={`w-2 h-2 rounded-full animate-pulse ${
-                    connectionStatus === 'connected' ? 'bg-emerald-500 shadow-[0_0_10px_#10b981]' : 
-                    connectionStatus === 'connecting' ? 'bg-amber-500' : 'bg-red-500'
-                  }`} />
-                  <span className="text-[10px] font-bold text-white/80 uppercase">
-                    {connectionStatus}
-                  </span>
-                </div>
-              </div>
-            </>
+            <><div className="w-px h-8 bg-white/10" /><div className="flex flex-col items-center"><span className="text-[10px] font-black text-emerald-500 uppercase tracking-widest opacity-50">Rede</span><div className="flex items-center gap-1.5 mt-1"><div className={`w-2 h-2 rounded-full animate-pulse ${connectionStatus === 'connected' ? 'bg-emerald-500 shadow-[0_0_10px_#10b981]' : connectionStatus === 'connecting' ? 'bg-amber-500' : 'bg-red-500'}`} /><span className="text-[10px] font-bold text-white/80 uppercase">{connectionStatus}</span></div></div></>
           )}
         </div>
       </div>
-      <button onClick={() => { setGameState('menu'); if(ablyRef.current) ablyRef.current.close(); }} 
-        className="absolute bottom-8 right-8 bg-zinc-900/80 backdrop-blur-md hover:bg-red-500/20 border border-white/10 hover:border-red-500/50 px-8 py-4 rounded-2xl text-white font-black text-xs uppercase tracking-widest transition-all z-20 active:scale-95">
-        Sair do Jogo
-      </button>
+      <button onClick={() => { setGameState('menu'); if(ablyRef.current) ablyRef.current.close(); }} className="absolute bottom-8 right-8 bg-zinc-900/80 backdrop-blur-md hover:bg-red-500/20 border border-white/10 hover:border-red-500/50 px-8 py-4 rounded-2xl text-white font-black text-xs uppercase tracking-widest transition-all z-20 active:scale-95">Sair do Jogo</button>
       <div className="absolute bottom-8 left-8 text-white/20 text-[10px] font-black uppercase tracking-[0.3em]">Full 3D Real-Time Physics Engine</div>
     </div>
   );
