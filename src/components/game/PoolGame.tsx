@@ -42,7 +42,6 @@ const PoolGame: React.FC = () => {
   const mousePos = useRef({ x: 0, y: 0 });
 
   useEffect(() => {
-    // Preload sounds
     hitSound.current = new Audio('/assets/sounds/hit.mp3');
     pocketSound.current = new Audio('/assets/sounds/pocket.mp3');
   }, []);
@@ -75,7 +74,6 @@ const PoolGame: React.FC = () => {
     });
     balls.push(cueBall);
 
-    // Rack balls
     const startX = TABLE_WIDTH * 0.7;
     const startY = TABLE_HEIGHT / 2;
     let ballIdx = 0;
@@ -93,10 +91,8 @@ const PoolGame: React.FC = () => {
 
     Matter.Events.on(engine, 'collisionStart', (event) => {
       event.pairs.forEach((pair) => {
-        const speed = pair.collision.depth * 5; // Use depth as a proxy for impact speed
-        if (speed > 0.1) {
-          playSound(hitSound.current, Math.min(speed, 1));
-        }
+        const speed = pair.collision.depth * 5;
+        if (speed > 0.1) playSound(hitSound.current, Math.min(speed, 1));
       });
     });
 
@@ -107,42 +103,29 @@ const PoolGame: React.FC = () => {
 
   const createBallTexture = (config: typeof ballConfigs[0] | undefined, isCue: boolean) => {
     const canvas = document.createElement('canvas');
-    canvas.width = 256;
-    canvas.height = 128;
+    canvas.width = 256; canvas.height = 128;
     const ctx = canvas.getContext('2d')!;
-    
-    // Background
     ctx.fillStyle = isCue ? '#ffffff' : (config?.c || '#eeeeee');
     ctx.fillRect(0, 0, 256, 128);
-
     if (config?.s) {
       ctx.fillStyle = '#ffffff';
-      ctx.fillRect(0, 0, 64, 128);
-      ctx.fillRect(192, 0, 64, 128);
+      ctx.fillRect(0, 0, 64, 128); ctx.fillRect(192, 0, 64, 128);
     }
-
     if (!isCue && config) {
-      ctx.fillStyle = '#ffffff';
-      ctx.beginPath();
-      ctx.arc(128, 64, 30, 0, Math.PI * 2);
-      ctx.fill();
-      ctx.fillStyle = '#000000';
-      ctx.font = 'bold 40px Arial';
-      ctx.textAlign = 'center';
-      ctx.textBaseline = 'middle';
+      ctx.fillStyle = '#ffffff'; ctx.beginPath(); ctx.arc(128, 64, 30, 0, Math.PI * 2); ctx.fill();
+      ctx.fillStyle = '#000000'; ctx.font = 'bold 40px Arial'; ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
       ctx.fillText(config.n.toString(), 128, 64);
     }
-
-    const texture = new THREE.CanvasTexture(canvas);
-    return texture;
+    return new THREE.CanvasTexture(canvas);
   };
 
   const initThree = (physicsBalls: Matter.Body[]) => {
     const scene = new THREE.Scene();
-    scene.background = new THREE.Color(0x1a1a1a);
+    scene.background = new THREE.Color(0x050505);
+    scene.fog = new THREE.Fog(0x050505, 1000, 3000);
     
-    const camera = new THREE.PerspectiveCamera(45, window.innerWidth / window.innerHeight, 1, 5000);
-    camera.position.set(TABLE_WIDTH / 2, 700, TABLE_HEIGHT / 2 + 500);
+    const camera = new THREE.PerspectiveCamera(45, window.innerWidth / window.innerHeight, 1, 10000);
+    camera.position.set(TABLE_WIDTH / 2, 700, TABLE_HEIGHT / 2 + 700);
     camera.lookAt(TABLE_WIDTH / 2, -100, TABLE_HEIGHT / 2);
 
     const renderer = new THREE.WebGLRenderer({ antialias: true });
@@ -152,101 +135,106 @@ const PoolGame: React.FC = () => {
 
     const texLoader = new THREE.TextureLoader();
     const feltTex = texLoader.load('/assets/textures/felt.jpg');
-    feltTex.wrapS = feltTex.wrapT = THREE.RepeatWrapping;
-    feltTex.repeat.set(4, 2);
-
+    feltTex.wrapS = feltTex.wrapT = THREE.RepeatWrapping; feltTex.repeat.set(4, 2);
     const woodTex = texLoader.load('/assets/textures/wood.jpg');
     woodTex.wrapS = woodTex.wrapT = THREE.RepeatWrapping;
+    const wallTex = texLoader.load('/assets/textures/wall.jpg');
+    wallTex.wrapS = wallTex.wrapT = THREE.RepeatWrapping; wallTex.repeat.set(5, 3);
+    const floorTex = texLoader.load('/assets/textures/floor.jpg');
+    floorTex.wrapS = floorTex.wrapT = THREE.RepeatWrapping; floorTex.repeat.set(10, 10);
 
-    // Lights
-    const ambientLight = new THREE.AmbientLight(0xffffff, 0.7);
+    // Environment/Room
+    // Floor
+    const floorGeo = new THREE.PlaneGeometry(10000, 10000);
+    const floorMat = new THREE.MeshStandardMaterial({ map: floorTex, color: 0x333333, roughness: 0.8 });
+    const floor = new THREE.Mesh(floorGeo, floorMat);
+    floor.rotation.x = -Math.PI / 2;
+    floor.position.y = -310;
+    floor.receiveShadow = true;
+    scene.add(floor);
+
+    // Walls
+    const wallGeo = new THREE.PlaneGeometry(10000, 4000);
+    const wallMat = new THREE.MeshStandardMaterial({ map: wallTex, color: 0x222222, roughness: 1 });
+    const backWall = new THREE.Mesh(wallGeo, wallMat);
+    backWall.position.set(TABLE_WIDTH/2, 1000, -1000);
+    scene.add(backWall);
+
+    // Modern Pub Lighting
+    const ambientLight = new THREE.AmbientLight(0xffffff, 0.3);
     scene.add(ambientLight);
 
-    const mainLight = new THREE.SpotLight(0xffffff, 2.5);
-    mainLight.position.set(TABLE_WIDTH / 2, 800, TABLE_HEIGHT / 2);
-    mainLight.angle = Math.PI / 3;
-    mainLight.penumbra = 0.4;
-    mainLight.castShadow = true;
-    mainLight.shadow.mapSize.width = 2048;
-    mainLight.shadow.mapSize.height = 2048;
-    scene.add(mainLight);
+    const tableLight = new THREE.SpotLight(0xffffff, 3);
+    tableLight.position.set(TABLE_WIDTH / 2, 600, TABLE_HEIGHT / 2);
+    tableLight.target.position.set(TABLE_WIDTH / 2, 0, TABLE_HEIGHT / 2);
+    tableLight.angle = Math.PI / 3;
+    tableLight.penumbra = 0.3;
+    tableLight.castShadow = true;
+    tableLight.shadow.mapSize.width = 2048;
+    tableLight.shadow.mapSize.height = 2048;
+    scene.add(tableLight);
+    scene.add(tableLight.target);
 
-    const fillLight = new THREE.DirectionalLight(0xffffff, 0.4);
-    fillLight.position.set(200, 400, 400);
-    scene.add(fillLight);
+    // Warm accent lights
+    const accent1 = new THREE.PointLight(0xffaa44, 2, 1500);
+    accent1.position.set(-500, 300, -200);
+    scene.add(accent1);
+    const accent2 = new THREE.PointLight(0xffaa44, 2, 1500);
+    accent2.position.set(TABLE_WIDTH + 500, 300, -200);
+    scene.add(accent2);
 
-    // Table Floor (Felt)
-    const feltMat = new THREE.MeshStandardMaterial({ 
-      map: feltTex,
-      color: 0x2e7d32, 
-      roughness: 0.9, 
-      metalness: 0.05 
-    });
-    const woodMat = new THREE.MeshStandardMaterial({ 
-      map: woodTex,
-      color: 0x3e2723, 
-      roughness: 0.6, 
-      metalness: 0.1 
-    });
+    // Table Materials
+    const feltMat = new THREE.MeshStandardMaterial({ map: feltTex, color: 0x1a4a1a, roughness: 0.9, metalness: 0.05 });
+    const woodMat = new THREE.MeshStandardMaterial({ map: woodTex, color: 0x3e2723, roughness: 0.6, metalness: 0.1 });
 
-    const tableGeo = new THREE.BoxGeometry(TABLE_WIDTH, 10, TABLE_HEIGHT);
+    // Table Construction
+    const tableGeo = new THREE.BoxGeometry(TABLE_WIDTH, 12, TABLE_HEIGHT);
     const table = new THREE.Mesh(tableGeo, feltMat);
-    table.position.set(TABLE_WIDTH / 2, -5, TABLE_HEIGHT / 2);
+    table.position.set(TABLE_WIDTH / 2, -6, TABLE_HEIGHT / 2);
     table.receiveShadow = true;
     scene.add(table);
 
-    // Rails
     const createRail = (x: number, y: number, z: number, w: number, h: number, d: number) => {
         const geo = new THREE.BoxGeometry(w, h, d);
         const mesh = new THREE.Mesh(geo, woodMat);
         mesh.position.set(x, y, z);
-        mesh.castShadow = true;
-        mesh.receiveShadow = true;
+        mesh.castShadow = true; mesh.receiveShadow = true;
         scene.add(mesh);
     };
-
     createRail(TABLE_WIDTH / 2, 10, -WALL_THICKNESS / 2, TABLE_WIDTH + WALL_THICKNESS * 2, 30, WALL_THICKNESS);
     createRail(TABLE_WIDTH / 2, 10, TABLE_HEIGHT + WALL_THICKNESS / 2, TABLE_WIDTH + WALL_THICKNESS * 2, 30, WALL_THICKNESS);
     createRail(-WALL_THICKNESS / 2, 10, TABLE_HEIGHT / 2, WALL_THICKNESS, 30, TABLE_HEIGHT);
     createRail(TABLE_WIDTH + WALL_THICKNESS / 2, 10, TABLE_HEIGHT / 2, WALL_THICKNESS, 30, TABLE_HEIGHT);
 
-    // Pockets
-    const pocketGeo = new THREE.CylinderGeometry(POCKET_RADIUS, POCKET_RADIUS, 5, 32);
+    // Visible Pockets
+    const pocketGeo = new THREE.CylinderGeometry(POCKET_RADIUS, POCKET_RADIUS, 10, 32);
     const pocketMat = new THREE.MeshBasicMaterial({ color: 0x000000 });
-    const pockets = [
+    const pocketsPos = [
         {x:0, y:0}, {x:TABLE_WIDTH/2, y:0}, {x:TABLE_WIDTH, y:0},
         {x:0, y:TABLE_HEIGHT}, {x:TABLE_WIDTH/2, y:TABLE_HEIGHT}, {x:TABLE_WIDTH, y:TABLE_HEIGHT}
     ];
-    pockets.forEach(p => {
+    pocketsPos.forEach(p => {
         const mesh = new THREE.Mesh(pocketGeo, pocketMat);
-        mesh.position.set(p.x, 0.1, p.y);
+        mesh.position.set(p.x, -2, p.y);
         scene.add(mesh);
     });
 
-    // Square Legs
-    const legSize = 60;
-    const legGeo = new THREE.BoxGeometry(legSize, 250, legSize);
+    // Thick Square Legs
+    const legSize = 70;
+    const legGeo = new THREE.BoxGeometry(legSize, 300, legSize);
     const createLeg = (x: number, z: number) => {
       const leg = new THREE.Mesh(legGeo, woodMat);
-      leg.position.set(x, -130, z);
+      leg.position.set(x, -155, z);
       leg.castShadow = true;
       scene.add(leg);
     };
-    createLeg(0, 0);
-    createLeg(TABLE_WIDTH, 0);
-    createLeg(0, TABLE_HEIGHT);
-    createLeg(TABLE_WIDTH, TABLE_HEIGHT);
+    createLeg(30, 30); createLeg(TABLE_WIDTH - 30, 30);
+    createLeg(30, TABLE_HEIGHT - 30); createLeg(TABLE_WIDTH - 30, TABLE_HEIGHT - 30);
 
     // Balls
     const ballGeo = new THREE.SphereGeometry(BALL_RADIUS, 32, 32);
     physicsBalls.forEach(body => {
-      const isCue = body.label === 'cueBall';
-      const config = (body as any).config;
-      const mat = new THREE.MeshStandardMaterial({ 
-        map: createBallTexture(config, isCue),
-        roughness: 0.1,
-        metalness: 0.1
-      });
+      const mat = new THREE.MeshStandardMaterial({ map: createBallTexture((body as any).config, body.label === 'cueBall'), roughness: 0.1, metalness: 0.1 });
       const mesh = new THREE.Mesh(ballGeo, mat);
       mesh.castShadow = true;
       scene.add(mesh);
@@ -255,18 +243,15 @@ const PoolGame: React.FC = () => {
 
     // Cue Stick
     const cueGroup = new THREE.Group();
-    const cueStickGeo = new THREE.CylinderGeometry(2, 4, 400, 16);
-    cueStickGeo.rotateX(Math.PI / 2);
-    cueStickGeo.translate(0, 0, -210);
+    const cueStickGeo = new THREE.CylinderGeometry(2, 5, 450, 16);
+    cueStickGeo.rotateX(Math.PI / 2); cueStickGeo.translate(0, 0, -240);
     const cueStickMat = new THREE.MeshStandardMaterial({ map: woodTex, color: 0xd7ccc8 });
     const cueStick = new THREE.Mesh(cueStickGeo, cueStickMat);
     cueGroup.add(cueStick);
     scene.add(cueGroup);
     cueRef.current = cueGroup;
 
-    sceneRef.current = scene;
-    cameraRef.current = camera;
-    rendererRef.current = renderer;
+    sceneRef.current = scene; cameraRef.current = camera; rendererRef.current = renderer;
   };
 
   useEffect(() => {
@@ -275,65 +260,48 @@ const PoolGame: React.FC = () => {
 
     const animate = () => {
       Matter.Engine.update(engine, 1000 / 60);
-      
       let moving = false;
       balls.forEach(body => {
         const mesh = balls3D.current.get(body.id);
         if (mesh) {
           mesh.position.set(body.position.x, BALL_RADIUS, body.position.y);
-          
           if (body.speed > 0.1) {
             moving = true;
             const axis = new THREE.Vector3(body.velocity.y, 0, -body.velocity.x).normalize();
-            const angle = body.speed / BALL_RADIUS;
-            mesh.rotateOnWorldAxis(axis, angle);
+            mesh.rotateOnWorldAxis(axis, body.speed / BALL_RADIUS);
           }
         }
-
         const pockets = [
             {x:0, y:0}, {x:TABLE_WIDTH/2, y:0}, {x:TABLE_WIDTH, y:0},
             {x:0, y:TABLE_HEIGHT}, {x:TABLE_WIDTH/2, y:TABLE_HEIGHT}, {x:TABLE_WIDTH, y:TABLE_HEIGHT}
         ];
         pockets.forEach(p => {
-            const dx = body.position.x - p.x;
-            const dy = body.position.y - p.y;
-            if (Math.sqrt(dx*dx + dy*dy) < POCKET_RADIUS) {
+            const d = Math.sqrt((body.position.x-p.x)**2 + (body.position.y-p.y)**2);
+            if (d < POCKET_RADIUS) {
                 if (body.label === 'cueBall') {
-                    Matter.Body.setPosition(body, {x: TABLE_WIDTH*0.25, y: TABLE_HEIGHT/2});
-                    Matter.Body.setVelocity(body, {x:0, y:0});
-                    playSound(pocketSound.current, 0.7);
-                } else {
-                    Matter.Composite.remove(engine.world, body);
+                    if (body.speed > 0.5) {
+                        Matter.Body.setPosition(body, {x: TABLE_WIDTH*0.25, y: TABLE_HEIGHT/2});
+                        Matter.Body.setVelocity(body, {x:0, y:0});
+                        playSound(pocketSound.current, 0.7);
+                    }
+                } else if (balls3D.current.has(body.id)) {
                     const m = balls3D.current.get(body.id);
-                    if (m) { sceneRef.current?.remove(m); balls3D.current.delete(body.id); }
-                    setScore(s => s + 10);
-                    playSound(pocketSound.current, 0.7);
+                    if (m) { sceneRef.current?.remove(m); balls3D.current.delete(body.id); Matter.Composite.remove(engine.world, body); setScore(s => s + 10); playSound(pocketSound.current, 0.7); }
                 }
             }
         });
       });
-
-      if (moving !== isMovingRef.current) {
-          isMovingRef.current = moving;
-          setIsMoving(moving);
-      }
-
+      if (moving !== isMovingRef.current) { isMovingRef.current = moving; setIsMoving(moving); }
       if (cueRef.current && !isMovingRef.current && isAimingRef.current) {
           const cb = cueBall.position;
-          const dx = cb.x - mousePos.current.x;
-          const dy = cb.y - mousePos.current.y;
-          const angle = Math.atan2(dy, dx);
-          const dist = Math.sqrt(dx*dx + dy*dy);
-          
+          const dx = cb.x - mousePos.current.x, dy = cb.y - mousePos.current.y;
+          const angle = Math.atan2(dy, dx), dist = Math.sqrt(dx*dx + dy*dy);
           cueRef.current.position.set(cb.x, BALL_RADIUS, cb.y);
           cueRef.current.rotation.y = -angle + Math.PI/2;
           cueRef.current.position.x -= Math.cos(angle) * (dist * 0.1);
           cueRef.current.position.z -= Math.sin(angle) * (dist * 0.1);
           cueRef.current.visible = true;
-      } else if (cueRef.current) {
-          cueRef.current.visible = false;
-      }
-
+      } else if (cueRef.current) cueRef.current.visible = false;
       rendererRef.current?.render(sceneRef.current!, cameraRef.current!);
       requestAnimationFrame(animate);
     };
@@ -341,40 +309,26 @@ const PoolGame: React.FC = () => {
     const handleMouseMove = (e: MouseEvent) => {
         if (!rendererRef.current) return;
         const rect = rendererRef.current.domElement.getBoundingClientRect();
-        const x = (e.clientX - rect.left) / rect.width * 2 - 1;
-        const y = -(e.clientY - rect.top) / rect.height * 2 + 1;
-        
+        const x = (e.clientX - rect.left) / rect.width * 2 - 1, y = -(e.clientY - rect.top) / rect.height * 2 + 1;
         const raycaster = new THREE.Raycaster();
         raycaster.setFromCamera(new THREE.Vector2(x, y), cameraRef.current!);
-        const plane = new THREE.Plane(new THREE.Vector3(0, 1, 0), 0);
         const target = new THREE.Vector3();
-        if (raycaster.ray.intersectPlane(plane, target)) {
-            mousePos.current = { x: target.x, y: target.z };
-        }
+        if (raycaster.ray.intersectPlane(new THREE.Plane(new THREE.Vector3(0, 1, 0), 0), target)) mousePos.current = { x: target.x, y: target.z };
     };
 
     const handleMouseDown = () => { if (!isMovingRef.current) isAimingRef.current = true; };
     const handleMouseUp = () => {
         if (isAimingRef.current) {
-            const dx = cueBall.position.x - mousePos.current.x;
-            const dy = cueBall.position.y - mousePos.current.y;
-            const angle = Math.atan2(dy, dx);
-            const dist = Math.min(Math.sqrt(dx*dx + dy*dy), 250);
-            
-            Matter.Body.applyForce(cueBall, cueBall.position, {
-                x: Math.cos(angle) * dist * 0.0015,
-                y: Math.sin(angle) * dist * 0.0015
-            });
+            const dx = cueBall.position.x - mousePos.current.x, dy = cueBall.position.y - mousePos.current.y;
+            const angle = Math.atan2(dy, dx), dist = Math.min(Math.sqrt(dx*dx + dy*dy), 250);
+            Matter.Body.applyForce(cueBall, cueBall.position, { x: Math.cos(angle) * dist * 0.0015, y: Math.sin(angle) * dist * 0.0015 });
             isAimingRef.current = false;
         }
     };
-
     window.addEventListener('mousemove', handleMouseMove);
     window.addEventListener('mousedown', handleMouseDown);
     window.addEventListener('mouseup', handleMouseUp);
-    
     animate();
-
     return () => {
         window.removeEventListener('mousemove', handleMouseMove);
         window.removeEventListener('mousedown', handleMouseDown);
@@ -386,7 +340,6 @@ const PoolGame: React.FC = () => {
   return (
     <div className="relative w-full h-screen bg-black overflow-hidden font-sans">
       <div ref={containerRef} className="absolute inset-0" />
-      
       <div className="absolute top-8 left-1/2 -translate-x-1/2 flex gap-8 items-center z-20">
         <div className="bg-zinc-900/80 backdrop-blur-xl border border-white/10 px-6 py-3 rounded-2xl shadow-2xl flex items-center gap-6">
           <div className="flex flex-col">
@@ -396,16 +349,11 @@ const PoolGame: React.FC = () => {
           <div className="w-px h-8 bg-white/10" />
           <div className="flex flex-col">
             <span className="text-[10px] font-black text-emerald-500 uppercase tracking-widest opacity-50">Status</span>
-            <span className={`text-xs font-bold uppercase ${isMoving ? 'text-amber-500' : 'text-emerald-400'}`}>
-              {isMoving ? 'Rolling...' : 'Ready'}
-            </span>
+            <span className={`text-xs font-bold uppercase ${isMoving ? 'text-amber-500' : 'text-emerald-400'}`}>{isMoving ? 'Rolling...' : 'Ready'}</span>
           </div>
         </div>
       </div>
-
-      <div className="absolute bottom-8 left-8 text-white/20 text-[10px] font-black uppercase tracking-[0.3em]">
-        Full 3D Real-Time Physics Engine
-      </div>
+      <div className="absolute bottom-8 left-8 text-white/20 text-[10px] font-black uppercase tracking-[0.3em]">Full 3D Real-Time Physics Engine</div>
     </div>
   );
 };
