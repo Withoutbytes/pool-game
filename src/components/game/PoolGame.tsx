@@ -31,11 +31,29 @@ const PoolGame: React.FC = () => {
   const balls3D = useRef<Map<number, THREE.Mesh>>(new Map());
   const cueRef = useRef<THREE.Group | null>(null);
   
+  // Sounds
+  const hitSound = useRef<HTMLAudioElement | null>(null);
+  const pocketSound = useRef<HTMLAudioElement | null>(null);
+
   const [score, setScore] = useState(0);
   const [isMoving, setIsMoving] = useState(false);
   const isMovingRef = useRef(false);
   const isAimingRef = useRef(false);
   const mousePos = useRef({ x: 0, y: 0 });
+
+  useEffect(() => {
+    // Preload sounds
+    hitSound.current = new Audio('/assets/sounds/hit.mp3');
+    pocketSound.current = new Audio('/assets/sounds/pocket.mp3');
+  }, []);
+
+  const playSound = (sound: HTMLAudioElement | null, volume = 0.5) => {
+    if (sound) {
+      const s = sound.cloneNode() as HTMLAudioElement;
+      s.volume = volume;
+      s.play().catch(() => {});
+    }
+  };
 
   const initPhysics = () => {
     const engine = Matter.Engine.create({ gravity: { x: 0, y: 0 } });
@@ -72,6 +90,15 @@ const PoolGame: React.FC = () => {
         balls.push(ball);
       }
     }
+
+    Matter.Events.on(engine, 'collisionStart', (event) => {
+      event.pairs.forEach((pair) => {
+        const speed = pair.collision.depth * 5; // Use depth as a proxy for impact speed
+        if (speed > 0.1) {
+          playSound(hitSound.current, Math.min(speed, 1));
+        }
+      });
+    });
 
     Matter.Composite.add(engine.world, [...walls, ...balls]);
     engineRef.current = engine;
@@ -112,67 +139,63 @@ const PoolGame: React.FC = () => {
 
   const initThree = (physicsBalls: Matter.Body[]) => {
     const scene = new THREE.Scene();
-    scene.background = new THREE.Color(0x111111);
+    scene.background = new THREE.Color(0x1a1a1a);
     
     const camera = new THREE.PerspectiveCamera(45, window.innerWidth / window.innerHeight, 1, 5000);
-    camera.position.set(TABLE_WIDTH / 2, 800, TABLE_HEIGHT / 2 + 600);
-    camera.lookAt(TABLE_WIDTH / 2, -50, TABLE_HEIGHT / 2);
+    camera.position.set(TABLE_WIDTH / 2, 700, TABLE_HEIGHT / 2 + 500);
+    camera.lookAt(TABLE_WIDTH / 2, -100, TABLE_HEIGHT / 2);
 
     const renderer = new THREE.WebGLRenderer({ antialias: true });
     renderer.setSize(window.innerWidth, window.innerHeight);
     renderer.shadowMap.enabled = true;
-    renderer.shadowMap.type = THREE.PCFSoftShadowMap;
     containerRef.current?.appendChild(renderer.domElement);
 
-    // Lights - Modern Studio Setup
-    const ambientLight = new THREE.AmbientLight(0xffffff, 0.6);
+    const texLoader = new THREE.TextureLoader();
+    const feltTex = texLoader.load('/assets/textures/felt.jpg');
+    feltTex.wrapS = feltTex.wrapT = THREE.RepeatWrapping;
+    feltTex.repeat.set(4, 2);
+
+    const woodTex = texLoader.load('/assets/textures/wood.jpg');
+    woodTex.wrapS = woodTex.wrapT = THREE.RepeatWrapping;
+
+    // Lights
+    const ambientLight = new THREE.AmbientLight(0xffffff, 0.7);
     scene.add(ambientLight);
 
-    const topLight = new THREE.RectAreaLight(0xffffff, 5, TABLE_WIDTH, TABLE_HEIGHT);
-    topLight.position.set(TABLE_WIDTH / 2, 400, TABLE_HEIGHT / 2);
-    topLight.lookAt(TABLE_WIDTH / 2, 0, TABLE_HEIGHT / 2);
-    scene.add(topLight);
-
-    const mainLight = new THREE.SpotLight(0xffffff, 3);
-    mainLight.position.set(TABLE_WIDTH / 2, 1000, TABLE_HEIGHT / 2);
+    const mainLight = new THREE.SpotLight(0xffffff, 2.5);
+    mainLight.position.set(TABLE_WIDTH / 2, 800, TABLE_HEIGHT / 2);
     mainLight.angle = Math.PI / 3;
-    mainLight.penumbra = 0.2;
+    mainLight.penumbra = 0.4;
     mainLight.castShadow = true;
-    mainLight.shadow.mapSize.width = 4096;
-    mainLight.shadow.mapSize.height = 4096;
+    mainLight.shadow.mapSize.width = 2048;
+    mainLight.shadow.mapSize.height = 2048;
     scene.add(mainLight);
 
-    const rimLight = new THREE.PointLight(0x40e0d0, 1, 1000); // Modern cyan accent
-    rimLight.position.set(TABLE_WIDTH / 2, 50, TABLE_HEIGHT / 2);
-    scene.add(rimLight);
-
-    // Materials
-    const feltMat = new THREE.MeshStandardMaterial({ 
-      color: 0x004d40, // Deep Teal/Modern Green
-      roughness: 0.9,
-      metalness: 0.05
-    });
-
-    const woodMat = new THREE.MeshStandardMaterial({ 
-      color: 0x0a0a0a, // Matte Black Wood
-      roughness: 0.4,
-      metalness: 0.3
-    });
-
-    const chromeMat = new THREE.MeshStandardMaterial({
-      color: 0x888888,
-      roughness: 0.1,
-      metalness: 1.0
-    });
+    const fillLight = new THREE.DirectionalLight(0xffffff, 0.4);
+    fillLight.position.set(200, 400, 400);
+    scene.add(fillLight);
 
     // Table Floor (Felt)
-    const tableGeo = new THREE.BoxGeometry(TABLE_WIDTH, 12, TABLE_HEIGHT);
+    const feltMat = new THREE.MeshStandardMaterial({ 
+      map: feltTex,
+      color: 0x2e7d32, 
+      roughness: 0.9, 
+      metalness: 0.05 
+    });
+    const woodMat = new THREE.MeshStandardMaterial({ 
+      map: woodTex,
+      color: 0x3e2723, 
+      roughness: 0.6, 
+      metalness: 0.1 
+    });
+
+    const tableGeo = new THREE.BoxGeometry(TABLE_WIDTH, 10, TABLE_HEIGHT);
     const table = new THREE.Mesh(tableGeo, feltMat);
-    table.position.set(TABLE_WIDTH / 2, -6, TABLE_HEIGHT / 2);
+    table.position.set(TABLE_WIDTH / 2, -5, TABLE_HEIGHT / 2);
     table.receiveShadow = true;
     scene.add(table);
 
-    // Rails (Modern Matte)
+    // Rails
     const createRail = (x: number, y: number, z: number, w: number, h: number, d: number) => {
         const geo = new THREE.BoxGeometry(w, h, d);
         const mesh = new THREE.Mesh(geo, woodMat);
@@ -180,30 +203,14 @@ const PoolGame: React.FC = () => {
         mesh.castShadow = true;
         mesh.receiveShadow = true;
         scene.add(mesh);
-        
-        // Add chrome accent line
-        const lineGeo = new THREE.BoxGeometry(w + 2, 2, d + 2);
-        const line = new THREE.Mesh(lineGeo, chromeMat);
-        line.position.set(x, y + h/2, z);
-        scene.add(line);
     };
 
-    // Adjusted rails to show pockets at corners and centers
-    const railH = 35;
-    const rw = TABLE_WIDTH / 2 - POCKET_RADIUS * 1.5;
-    const rh = TABLE_HEIGHT - POCKET_RADIUS * 3;
+    createRail(TABLE_WIDTH / 2, 10, -WALL_THICKNESS / 2, TABLE_WIDTH + WALL_THICKNESS * 2, 30, WALL_THICKNESS);
+    createRail(TABLE_WIDTH / 2, 10, TABLE_HEIGHT + WALL_THICKNESS / 2, TABLE_WIDTH + WALL_THICKNESS * 2, 30, WALL_THICKNESS);
+    createRail(-WALL_THICKNESS / 2, 10, TABLE_HEIGHT / 2, WALL_THICKNESS, 30, TABLE_HEIGHT);
+    createRail(TABLE_WIDTH + WALL_THICKNESS / 2, 10, TABLE_HEIGHT / 2, WALL_THICKNESS, 30, TABLE_HEIGHT);
 
-    // Top rails
-    createRail(TABLE_WIDTH * 0.25 + 5, 10, -WALL_THICKNESS / 2, rw, railH, WALL_THICKNESS);
-    createRail(TABLE_WIDTH * 0.75 - 5, 10, -WALL_THICKNESS / 2, rw, railH, WALL_THICKNESS);
-    // Bottom rails
-    createRail(TABLE_WIDTH * 0.25 + 5, 10, TABLE_HEIGHT + WALL_THICKNESS / 2, rw, railH, WALL_THICKNESS);
-    createRail(TABLE_WIDTH * 0.75 - 5, 10, TABLE_HEIGHT + WALL_THICKNESS / 2, rw, railH, WALL_THICKNESS);
-    // Side rails
-    createRail(-WALL_THICKNESS / 2, 10, TABLE_HEIGHT / 2, WALL_THICKNESS, railH, rh);
-    createRail(TABLE_WIDTH + WALL_THICKNESS / 2, 10, TABLE_HEIGHT / 2, WALL_THICKNESS, railH, rh);
-
-    // Pockets (Visual)
+    // Pockets
     const pocketGeo = new THREE.CylinderGeometry(POCKET_RADIUS, POCKET_RADIUS, 5, 32);
     const pocketMat = new THREE.MeshBasicMaterial({ color: 0x000000 });
     const pockets = [
@@ -214,34 +221,21 @@ const PoolGame: React.FC = () => {
         const mesh = new THREE.Mesh(pocketGeo, pocketMat);
         mesh.position.set(p.x, 0.1, p.y);
         scene.add(mesh);
-        
-        // Chrome rim for pocket
-        const ringGeo = new THREE.TorusGeometry(POCKET_RADIUS, 2, 16, 32);
-        ringGeo.rotateX(Math.PI / 2);
-        const ring = new THREE.Mesh(ringGeo, chromeMat);
-        ring.position.set(p.x, 2, p.y);
-        scene.add(ring);
     });
 
-    // Modern Square Legs
-    const legSize = 70;
-    const legGeo = new THREE.BoxGeometry(legSize, 300, legSize);
+    // Square Legs
+    const legSize = 60;
+    const legGeo = new THREE.BoxGeometry(legSize, 250, legSize);
     const createLeg = (x: number, z: number) => {
       const leg = new THREE.Mesh(legGeo, woodMat);
-      leg.position.set(x, -150, z);
+      leg.position.set(x, -130, z);
       leg.castShadow = true;
       scene.add(leg);
-      
-      // Chrome base for leg
-      const baseGeo = new THREE.BoxGeometry(legSize + 10, 20, legSize + 10);
-      const base = new THREE.Mesh(baseGeo, chromeMat);
-      base.position.set(x, -300, z);
-      scene.add(base);
     };
-    createLeg(WALL_THICKNESS, WALL_THICKNESS);
-    createLeg(TABLE_WIDTH - WALL_THICKNESS, WALL_THICKNESS);
-    createLeg(WALL_THICKNESS, TABLE_HEIGHT - WALL_THICKNESS);
-    createLeg(TABLE_WIDTH - WALL_THICKNESS, TABLE_HEIGHT - WALL_THICKNESS);
+    createLeg(0, 0);
+    createLeg(TABLE_WIDTH, 0);
+    createLeg(0, TABLE_HEIGHT);
+    createLeg(TABLE_WIDTH, TABLE_HEIGHT);
 
     // Balls
     const ballGeo = new THREE.SphereGeometry(BALL_RADIUS, 32, 32);
@@ -264,7 +258,7 @@ const PoolGame: React.FC = () => {
     const cueStickGeo = new THREE.CylinderGeometry(2, 4, 400, 16);
     cueStickGeo.rotateX(Math.PI / 2);
     cueStickGeo.translate(0, 0, -210);
-    const cueStickMat = new THREE.MeshStandardMaterial({ color: 0xd7ccc8 });
+    const cueStickMat = new THREE.MeshStandardMaterial({ map: woodTex, color: 0xd7ccc8 });
     const cueStick = new THREE.Mesh(cueStickGeo, cueStickMat);
     cueGroup.add(cueStick);
     scene.add(cueGroup);
@@ -307,11 +301,13 @@ const PoolGame: React.FC = () => {
                 if (body.label === 'cueBall') {
                     Matter.Body.setPosition(body, {x: TABLE_WIDTH*0.25, y: TABLE_HEIGHT/2});
                     Matter.Body.setVelocity(body, {x:0, y:0});
+                    playSound(pocketSound.current, 0.7);
                 } else {
                     Matter.Composite.remove(engine.world, body);
                     const m = balls3D.current.get(body.id);
                     if (m) { sceneRef.current?.remove(m); balls3D.current.delete(body.id); }
                     setScore(s => s + 10);
+                    playSound(pocketSound.current, 0.7);
                 }
             }
         });
